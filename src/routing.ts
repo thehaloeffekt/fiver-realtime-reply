@@ -5,9 +5,13 @@
  * extensions themselves. After an extension sends a message to Telegram it
  * reports the resulting (chat_id, message_id) with a "claim". Later updates
  * that point at that message — a reply, an inline-button press, a reaction —
- * go to the account that claimed it. Everything else (plain messages,
- * commands) is "unrouted" and goes to every connected instance.
+ * go to the account that claimed it. `targetFor` applies the full rule set.
  */
+
+import { ACCOUNT_ID } from "./util";
+
+/** Target meaning "every connected instance". */
+export const BROADCAST = "*";
 
 export interface RouteKey {
 	/** Telegram chat id as a decimal string, or "inline" for inline messages. */
@@ -92,6 +96,65 @@ export function routeKeyOf(update: Json): RouteKey | null {
 	}
 
 	return null;
+}
+
+/**
+ * Fallback for button presses: the extension writes the owning account into
+ * every button as `c|{accountId}|{action}|{arg}`. Returns that accountId, or
+ * null when the data does not have this shape.
+ */
+export function callbackAccountOf(update: Json): string | null {
+	const data = obj(update.callback_query)?.data;
+	if (typeof data !== "string") return null;
+	const parts = data.split("|");
+	// `arg` may be empty and may itself contain "|", so require at least 4 parts.
+	if (parts.length < 4 || parts[0] !== "c") return null;
+	const accountId = parts[1]!;
+	return ACCOUNT_ID.test(accountId) ? accountId : null;
+}
+
+/** The message-like object of an update (message, edited_message, …), if any. */
+function messageOf(update: Json): Json | null {
+	for (const field of MESSAGE_FIELDS) {
+		const message = obj(update[field]);
+		if (message) return message;
+	}
+	return null;
+}
+
+/** True for a bot command such as "/start" or "/check@MyBot arg". */
+export function isCommand(update: Json): boolean {
+	const text = messageOf(update)?.text;
+	return typeof text === "string" && text.startsWith("/");
+}
+
+/**
+ * Decides where an update goes.
+ *
+ * @param claimedBy the account that claimed the message this update refers
+ *   to (from `routeKeyOf` + the routes table), or null.
+ * @returns an accountId, BROADCAST, or null to drop the update.
+ */
+export function targetFor(update: Json, claimedBy: string | null): string | null {
+	// 1. Commands are for every profile, even when sent as a reply.
+	if (isCommand(update)) return BROADCAST;
+	// 2. A claimed message decides.
+	if (claimedBy) return claimedBy;
+	// 3. Unclaimed button press: the account written into callback_data, else everyone.
+	if (update.callback_query !== undefined) return callbackAccountOf(update) ?? BROADCAST;
+	// 4. Unclaimed messages and things that point at a message (reactions,
+	//    inline results) cannot be attributed to a profile: drop them.
+	if (
+		messageOf(update) ||
+		update.message_reaction !== undefined ||
+		update.message_reaction_count !== undefined ||
+		update.chosen_inline_result !== undefined
+	) {
+		return null;
+	}
+	// 5. Anything else (my_chat_member when the bot is blocked, …) concerns the
+	//    bot as a whole, so every profile hears about it.
+	return BROADCAST;
 }
 
 /** Parses one claim item sent by an extension. */

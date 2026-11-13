@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { parseClaim, routeKeyOf, type RouteKey } from "./routing";
+import { BROADCAST, parseClaim, routeKeyOf, targetFor, type RouteKey } from "./routing";
 import { ACCOUNT_ID, HEX64, cleanLabel, fromHex, sha256, timingSafeEqual, toHex } from "./util";
 
 /** Hard rule: no update is kept longer than this. */
@@ -21,10 +21,14 @@ export const MAX_SOCKETS = 32;
 export const MAX_CLIENT_MESSAGE_BYTES = 16 * 1024;
 export const MAX_CLAIMS_PER_MESSAGE = 100;
 export const MAX_ACKS_PER_MESSAGE = 100;
+/** Most updates held in the buffer per bot; the oldest are dropped first. */
+export const MAX_QUEUED_UPDATES = 50;
+/** Accepted webhook calls per bot in any rolling minute. */
+export const HOOK_RATE_LIMIT = 60;
+export const HOOK_RATE_WINDOW_MS = 60_000;
+/** At most one "offline" notice per account in this period. */
+export const OFFLINE_NOTICE_INTERVAL_MS = 5 * 60_000;
 const HOUSEKEEPING_INTERVAL_MS = 60_000;
-
-/** Target for updates that no claim matches: every connected instance. */
-const BROADCAST = "*";
 
 export const CLOSE = {
 	AUTH_REQUIRED: 4001,
@@ -85,9 +89,14 @@ export class RelayHub extends DurableObject<Env> {
 			);
 			CREATE INDEX IF NOT EXISTS pending_received ON pending (received_at);
 			CREATE TABLE IF NOT EXISTS seen (update_id INTEGER PRIMARY KEY, at INTEGER NOT NULL);
+			CREATE TABLE IF NOT EXISTS hook_hits (at INTEGER NOT NULL);
+			CREATE TABLE IF NOT EXISTS offline_notices (account_id TEXT PRIMARY KEY, at INTEGER NOT NULL);
 		`);
-		// Answered by the runtime without waking the object from hibernation.
-		ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('{"type":"ping"}', '{"type":"pong"}'));
+		// The extension sends the text "ping" every 20 s. The runtime answers
+		// "pong" itself, so a hibernated object stays asleep. Only one pair can be
+		// registered per object; the older {"type":"ping"} frame is still
+		// answered, but by webSocketMessage.
+		ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
 	}
 
 	// ---------------------------------------------------------------- secret
@@ -119,6 +128,12 @@ export class RelayHub extends DurableObject<Env> {
 		if (!secretHeader || secretHeader.length > 256) return 401;
 		if (!(await this.checkSecret(secretHeader, false))) return 401;
 
+		const now = Date.now();
+		this.housekeeping(now);
+
+		// Over the limit: say 200 so Telegram does not retry, and drop the update.
+		if (!this.takeHookSlot(now)) return 200;
+
 		let update: Record<string, unknown>;
 		try {
 			const parsed: unknown = JSON.parse(body);
@@ -130,15 +145,17 @@ export class RelayHub extends DurableObject<Env> {
 		const updateId = update.update_id;
 		if (typeof updateId !== "number" || !Number.isSafeInteger(updateId) || updateId < 0) return 400;
 
-		const now = Date.now();
-		this.housekeeping(now);
-
 		// Telegram retries a delivery it thinks failed; deliver each update once.
 		if (this.sql.exec("SELECT 1 FROM seen WHERE update_id = ?", updateId).toArray().length) return 200;
 		this.sql.exec("INSERT INTO seen (update_id, at) VALUES (?, ?)", updateId, now);
 
 		const key = routeKeyOf(update);
-		const target = (key && this.lookupRoute(key)) ?? BROADCAST;
+		const target = targetFor(update, key && this.lookupRoute(key));
+		if (target === null) {
+			// Dropped (unclaimed plain message). Only its update_id is kept, for de-duplication.
+			await this.scheduleAlarm(now + SEEN_TTL_MS);
+			return 200;
+		}
 
 		this.sql.exec(
 			"INSERT OR REPLACE INTO pending (update_id, target, body, received_at) VALUES (?, ?, ?, ?)",
@@ -147,13 +164,56 @@ export class RelayHub extends DurableObject<Env> {
 			body,
 			now,
 		);
+		this.capQueue();
 
 		const frame = updateFrame(updateId, target !== BROADCAST, body);
 		const sockets = target === BROADCAST ? this.authedSockets() : this.authedSockets(target);
 		for (const ws of sockets) safeSend(ws, frame);
+		if (target !== BROADCAST && sockets.length === 0) this.noticeOffline(target, now);
 
 		await this.scheduleAlarm(now + UPDATE_TTL_MS);
 		return 200;
+	}
+
+	/**
+	 * Sliding-window rate limit: true if this webhook call may proceed. Only
+	 * calls that passed the secret check get here, so a stranger who knows
+	 * the botKey cannot use up the bot's allowance.
+	 */
+	private takeHookSlot(now: number): boolean {
+		this.sql.exec("DELETE FROM hook_hits WHERE at <= ?", now - HOOK_RATE_WINDOW_MS);
+		const used = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM hook_hits").one().n;
+		if (used >= HOOK_RATE_LIMIT) return false;
+		this.sql.exec("INSERT INTO hook_hits (at) VALUES (?)", now);
+		return true;
+	}
+
+	/** Keeps at most MAX_QUEUED_UPDATES buffered updates, dropping the oldest. */
+	private capQueue() {
+		const count = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM pending").one().n;
+		if (count <= MAX_QUEUED_UPDATES) return;
+		this.sql.exec(
+			"DELETE FROM pending WHERE update_id IN (SELECT update_id FROM pending ORDER BY received_at, update_id LIMIT ?)",
+			count - MAX_QUEUED_UPDATES,
+		);
+	}
+
+	/**
+	 * Tells one other connected profile that `accountId` is offline, so it can
+	 * say so in Telegram. At most once per account per 5 minutes; the time is
+	 * stored only when a notice was really sent.
+	 */
+	private noticeOffline(accountId: string, now: number) {
+		const recent = this.sql
+			.exec("SELECT 1 FROM offline_notices WHERE account_id = ? AND at > ?", accountId, now - OFFLINE_NOTICE_INTERVAL_MS)
+			.toArray().length;
+		if (recent) return;
+		const messenger = this.authedSockets().find((ws) => stateOf(ws)!.accountId !== accountId);
+		if (!messenger) return;
+		const label =
+			this.sql.exec<{ label: string }>("SELECT label FROM accounts WHERE account_id = ?", accountId).toArray()[0]?.label ?? "";
+		safeSend(messenger, JSON.stringify({ type: "offline", accountId, label }));
+		this.sql.exec("INSERT OR REPLACE INTO offline_notices (account_id, at) VALUES (?, ?)", accountId, now);
 	}
 
 	private lookupRoute(key: RouteKey): string | null {
@@ -233,6 +293,9 @@ export class RelayHub extends DurableObject<Env> {
 	}
 
 	private async authenticate(ws: WebSocket, state: SocketState, msg: Record<string, unknown>, now: number) {
+		// Before this release the runtime answered {"type":"ping"} even before
+		// auth. Keep doing so; the 5-second auth deadline still applies.
+		if (msg.type === "ping") return safeSend(ws, '{"type":"pong"}');
 		if (msg.type !== "auth") return safeClose(ws, CLOSE.AUTH_REQUIRED, "auth required");
 		if (now - state.connectedAt > AUTH_TIMEOUT_MS) return safeClose(ws, CLOSE.AUTH_TIMEOUT, "auth timeout");
 		if (typeof msg.secret !== "string" || !HEX64.test(msg.secret)) {
@@ -283,7 +346,7 @@ export class RelayHub extends DurableObject<Env> {
 		this.broadcastPresence();
 	}
 
-	private handleClaim(ws: WebSocket, state: SocketState, msg: Record<string, unknown>, now: number) {
+	private async handleClaim(ws: WebSocket, state: SocketState, msg: Record<string, unknown>, now: number) {
 		const items = Array.isArray(msg.items) ? msg.items : [msg];
 		if (items.length > MAX_CLAIMS_PER_MESSAGE) return sendError(ws, "too_many_claims");
 		let bad = 0;
@@ -302,6 +365,8 @@ export class RelayHub extends DurableObject<Env> {
 			);
 		}
 		if (bad) sendError(ws, "bad_claim", `${bad} claim(s) ignored`);
+		// The alarm also deletes claims, so it must run when this one expires.
+		if (bad < items.length) await this.scheduleAlarm(now + ROUTE_TTL_MS);
 	}
 
 	private handleAck(ws: WebSocket, state: SocketState, msg: Record<string, unknown>) {
@@ -374,6 +439,8 @@ export class RelayHub extends DurableObject<Env> {
 		this.lastHousekeeping = now;
 		this.sql.exec("DELETE FROM seen WHERE at <= ?", now - SEEN_TTL_MS);
 		this.sql.exec("DELETE FROM routes WHERE created_at <= ?", now - ROUTE_TTL_MS);
+		this.sql.exec("DELETE FROM hook_hits WHERE at <= ?", now - HOOK_RATE_WINDOW_MS);
+		this.sql.exec("DELETE FROM offline_notices WHERE at <= ?", now - OFFLINE_NOTICE_INTERVAL_MS);
 		const count = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM routes").one().n;
 		if (count > MAX_ROUTES) {
 			this.sql.exec(
@@ -396,8 +463,16 @@ export class RelayHub extends DurableObject<Env> {
 			if (deadline <= now) safeClose(ws, CLOSE.AUTH_TIMEOUT, "auth timeout");
 			else next = Math.min(next, deadline);
 		}
-		const oldest = this.sql.exec<{ t: number | null }>("SELECT MIN(received_at) AS t FROM pending").one().t;
-		if (oldest !== null) next = Math.min(next, oldest + UPDATE_TTL_MS);
+		// Wake again when the next buffered update, claim or seen id expires.
+		const expiries: Array<[string, number]> = [
+			["SELECT MIN(received_at) AS t FROM pending", UPDATE_TTL_MS],
+			["SELECT MIN(created_at) AS t FROM routes", ROUTE_TTL_MS],
+			["SELECT MIN(at) AS t FROM seen", SEEN_TTL_MS],
+		];
+		for (const [query, ttl] of expiries) {
+			const oldest = this.sql.exec<{ t: number | null }>(query).one().t;
+			if (oldest !== null) next = Math.min(next, oldest + ttl);
+		}
 
 		if (next !== Infinity) await this.ctx.storage.setAlarm(Math.max(next, now + 1));
 	}

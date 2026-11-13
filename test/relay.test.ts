@@ -1,6 +1,14 @@
 import { env, evictDurableObject, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { AUTH_TIMEOUT_MS, CLOSE, UPDATE_HARD_LIMIT_MS, UPDATE_TTL_MS } from "../src/relay";
+import {
+	AUTH_TIMEOUT_MS,
+	CLOSE,
+	HOOK_RATE_LIMIT,
+	MAX_QUEUED_UPDATES,
+	ROUTE_TTL_MS,
+	UPDATE_HARD_LIMIT_MS,
+	UPDATE_TTL_MS,
+} from "../src/relay";
 
 const BASE = "https://relay.example";
 
@@ -35,7 +43,9 @@ async function open(botKey: string, accountId: string): Promise<Client> {
 	const queue: Frame[] = [];
 	const waiters: Array<() => void> = [];
 	ws.addEventListener("message", (e) => {
-		queue.push(JSON.parse(e.data as string));
+		const data = e.data as string;
+		// Keep-alive replies are plain text, everything else is JSON.
+		queue.push(data.startsWith("{") ? JSON.parse(data) : { type: "text", data });
 		waiters.splice(0).forEach((w) => w());
 	});
 	const closed = new Promise<{ code: number; reason: string }>((resolve) =>
@@ -85,6 +95,12 @@ async function silent(c: Client, type: string, ms = 300) {
 }
 
 const stubFor = (botKey: string) => env.RELAY.get(env.RELAY.idFromName(botKey));
+
+const pendingCount = (botKey: string) =>
+	runInDurableObject(stubFor(botKey), (_i, state) =>
+		state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM pending").one().n,
+	);
+const pause = (ms = 50) => new Promise((r) => setTimeout(r, ms));
 
 describe("routes", () => {
 	it("GET /health returns ok", async () => {
@@ -206,7 +222,7 @@ describe("websocket authentication", () => {
 describe("routing", () => {
 	const CHAT = 777;
 
-	it("broadcasts unrouted updates to every instance", async () => {
+	it("broadcasts bot commands to every instance", async () => {
 		const bot = await newBot();
 		const a = await connect(bot, "alice");
 		const b = await connect(bot, "bob");
@@ -251,10 +267,116 @@ describe("routing", () => {
 		b.ws.close();
 	});
 
+	it("drops plain messages that match no claim", async () => {
+		const bot = await newBot();
+		const a = await connect(bot, "alice");
+		const b = await connect(bot, "bob");
+		const plain = { update_id: 70, message: { message_id: 9, chat: { id: CHAT }, text: "hello" } };
+		const strayReply = {
+			update_id: 71,
+			message: { message_id: 10, chat: { id: CHAT }, text: "ok", reply_to_message: { message_id: 999 } },
+		};
+		for (const u of [plain, strayReply]) expect((await hook(bot.botKey, bot.secret, u)).status).toBe(200);
+		expect(await silent(a, "update")).toBe(true);
+		expect(await silent(b, "update")).toBe(true);
+		expect(await pendingCount(bot.botKey)).toBe(0);
+		a.ws.close();
+		b.ws.close();
+	});
+
+	it("broadcasts a command even when it replies to a claimed message", async () => {
+		const bot = await newBot();
+		const a = await connect(bot, "alice");
+		const b = await connect(bot, "bob");
+		a.send({ type: "claim", chatId: CHAT, messageId: 400 });
+		await pause();
+		const cmd = {
+			update_id: 72,
+			message: { message_id: 401, chat: { id: CHAT }, text: "/status", reply_to_message: { message_id: 400 } },
+		};
+		await hook(bot.botKey, bot.secret, cmd);
+		expect(await a.next("update")).toMatchObject({ id: 72, routed: false });
+		expect(await b.next("update")).toMatchObject({ id: 72, routed: false });
+		a.ws.close();
+		b.ws.close();
+	});
+
+	it("routes an unclaimed button press by the accountId in callback_data", async () => {
+		const bot = await newBot();
+		const a = await connect(bot, "alice");
+		const b = await connect(bot, "bob");
+		const press = (id: number, data: string) => ({
+			update_id: id,
+			callback_query: { id: `q${id}`, data, message: { message_id: 500 + id, chat: { id: CHAT } } },
+		});
+		await hook(bot.botKey, bot.secret, press(80, "c|bob|reply|order-42"));
+		await hook(bot.botKey, bot.secret, press(81, "c|bob|open|")); // empty arg is fine
+		expect(await b.next("update")).toMatchObject({ id: 80, routed: true });
+		expect(await b.next("update")).toMatchObject({ id: 81, routed: true });
+		expect(await silent(a, "update")).toBe(true);
+
+		// Not the c|accountId|action|arg shape: broadcast.
+		for (const [id, data] of [[82, "open|42"], [83, "c|bob|open"], [84, "c|bad id!|x|y"]] as const) {
+			await hook(bot.botKey, bot.secret, press(id, data));
+			expect(await a.next("update")).toMatchObject({ id, routed: false });
+			expect(await b.next("update")).toMatchObject({ id, routed: false });
+		}
+		a.ws.close();
+		b.ws.close();
+	});
+
+	it("prefers a claim over the accountId in callback_data", async () => {
+		const bot = await newBot();
+		const a = await connect(bot, "alice");
+		const b = await connect(bot, "bob");
+		a.send({ type: "claim", chatId: CHAT, messageId: 600 });
+		await pause();
+		await hook(bot.botKey, bot.secret, {
+			update_id: 85,
+			callback_query: { id: "q", data: "c|bob|open|1", message: { message_id: 600, chat: { id: CHAT } } },
+		});
+		expect((await a.next("update")).id).toBe(85);
+		expect(await silent(b, "update")).toBe(true);
+		a.ws.close();
+		b.ws.close();
+	});
+
+	it("tells one other profile when the target account is offline, at most once per 5 minutes", async () => {
+		const bot = await newBot();
+		const a = await connect(bot, "alice", "Alice");
+		const c = await connect(bot, "carol", "Carol");
+		const b = await connect(bot, "bob", "Bob (main)");
+		b.ws.close();
+		await b.closed;
+
+		const press = (id: number) => ({
+			update_id: id,
+			callback_query: { id: `q${id}`, data: "c|bob|reply|1", message: { message_id: id, chat: { id: CHAT } } },
+		});
+		await hook(bot.botKey, bot.secret, press(90));
+		const notice = await Promise.any([a.next("offline"), c.next("offline")]);
+		expect(notice).toEqual({ type: "offline", accountId: "bob", label: "Bob (main)" });
+		// Exactly one socket got it.
+		expect((await silent(a, "offline")) && (await silent(c, "offline"))).toBe(true);
+
+		await hook(bot.botKey, bot.secret, press(91));
+		expect(await silent(a, "offline")).toBe(true);
+		expect(await silent(c, "offline")).toBe(true);
+
+		// After the 5-minute window a new notice may go out.
+		await runInDurableObject(stubFor(bot.botKey), (_i, state) => {
+			state.storage.sql.exec("UPDATE offline_notices SET at = at - ?", 5 * 60_000);
+		});
+		await hook(bot.botKey, bot.secret, press(92));
+		await Promise.any([a.next("offline"), c.next("offline")]);
+		a.ws.close();
+		c.ws.close();
+	});
+
 	it("delivers each update_id only once", async () => {
 		const bot = await newBot();
 		const a = await connect(bot, "alice");
-		const update = { update_id: 30, message: { message_id: 1, chat: { id: CHAT }, text: "x" } };
+		const update = { update_id: 30, message: { message_id: 1, chat: { id: CHAT }, text: "/check" } };
 		await hook(bot.botKey, bot.secret, update);
 		await hook(bot.botKey, bot.secret, update);
 		expect((await a.next("update")).id).toBe(30);
@@ -293,6 +415,75 @@ describe("routing", () => {
 	});
 });
 
+describe("keep-alive", () => {
+	it('answers the text "ping" with "pong" without running the object', async () => {
+		const bot = await newBot();
+		const a = await connect(bot, "alice");
+		a.send("ping");
+		expect(await a.next("text")).toEqual({ type: "text", data: "pong" });
+		const answered = await runInDurableObject(stubFor(bot.botKey), (_i, state) =>
+			state.getWebSockets("acct:alice").map((ws) => state.getWebSocketAutoResponseTimestamp(ws)),
+		);
+		expect(answered[0]).toBeInstanceOf(Date);
+		// The older JSON ping still works.
+		a.send({ type: "ping" });
+		expect((await a.next("pong")).type).toBe("pong");
+		a.ws.close();
+	});
+});
+
+describe("limits", () => {
+	it(`accepts ${HOOK_RATE_LIMIT} webhook calls per minute and drops the rest with 200`, async () => {
+		const bot = await newBot();
+		const a = await connect(bot, "alice");
+		const cmd = (id: number) => ({ update_id: id, message: { message_id: id, chat: { id: 1 }, text: "/s" } });
+		for (let i = 1; i <= HOOK_RATE_LIMIT; i++) expect((await hook(bot.botKey, bot.secret, cmd(i))).status).toBe(200);
+		for (let i = 1; i <= HOOK_RATE_LIMIT; i++) expect((await a.next("update")).id).toBe(i);
+
+		const over = await hook(bot.botKey, bot.secret, cmd(1000));
+		expect(over.status).toBe(200);
+		expect(await silent(a, "update")).toBe(true);
+
+		// Wrong-secret calls are refused before the limiter and never count.
+		const before = await runInDurableObject(stubFor(bot.botKey), (_i, state) =>
+			state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM hook_hits").one().n,
+		);
+		expect((await hook(bot.botKey, "0".repeat(64), cmd(1001))).status).toBe(401);
+		const after = await runInDurableObject(stubFor(bot.botKey), (_i, state) =>
+			state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM hook_hits").one().n,
+		);
+		expect(after).toBe(before);
+
+		// Once the window slides past, updates flow again.
+		await runInDurableObject(stubFor(bot.botKey), (_i, state) => {
+			state.storage.sql.exec("UPDATE hook_hits SET at = at - 60000");
+		});
+		await hook(bot.botKey, bot.secret, cmd(1002));
+		expect((await a.next("update")).id).toBe(1002);
+		a.ws.close();
+	});
+
+	it(`keeps at most ${MAX_QUEUED_UPDATES} queued updates and drops the oldest first`, async () => {
+		const bot = await newBot();
+		const b = await connect(bot, "bob");
+		b.ws.close();
+		await b.closed;
+		const total = MAX_QUEUED_UPDATES + 3;
+		for (let id = 1; id <= total; id++) {
+			const press = { update_id: id, callback_query: { id: `q${id}`, data: "c|bob|open|x" } };
+			expect((await hook(bot.botKey, bot.secret, press)).status).toBe(200);
+		}
+		expect(await pendingCount(bot.botKey)).toBe(MAX_QUEUED_UPDATES);
+
+		const b2 = await connect(bot, "bob");
+		const ids: number[] = [];
+		for (let i = 0; i < MAX_QUEUED_UPDATES; i++) ids.push((await b2.next("update")).id);
+		expect(ids[0]).toBe(4);
+		expect(ids.at(-1)).toBe(total);
+		b2.ws.close();
+	});
+});
+
 describe("hibernation", () => {
 	it("keeps routing to authenticated sockets after the object is evicted", async () => {
 		const bot = await newBot();
@@ -316,7 +507,7 @@ describe("retention", () => {
 		await a.closed;
 
 		const before = Date.now();
-		await hook(bot.botKey, bot.secret, { update_id: 50, message: { message_id: 1, chat: { id: 1 }, text: "x" } });
+		await hook(bot.botKey, bot.secret, { update_id: 50, message: { message_id: 1, chat: { id: 1 }, text: "/start" } });
 		const stub = stubFor(bot.botKey);
 
 		const alarm = await runInDurableObject(stub, (_i, state) => state.storage.getAlarm());
@@ -328,9 +519,34 @@ describe("retention", () => {
 			state.storage.sql.exec("UPDATE pending SET received_at = received_at - ?", UPDATE_TTL_MS);
 		});
 		expect(await runDurableObjectAlarm(stub)).toBe(true);
-		const left = await runInDurableObject(stub, (_i, state) =>
-			state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM pending").one().n,
-		);
-		expect(left).toBe(0);
+		expect(await pendingCount(bot.botKey)).toBe(0);
+	});
+
+	it("the alarm deletes expired claims", async () => {
+		const bot = await newBot();
+		const a = await connect(bot, "alice");
+		const before = Date.now();
+		a.send({ type: "claim", items: [{ chatId: 1, messageId: 1 }, { chatId: 1, messageId: 2 }] });
+		await pause();
+		a.ws.close();
+		await a.closed;
+		const stub = stubFor(bot.botKey);
+
+		const alarm = await runInDurableObject(stub, (_i, state) => state.storage.getAlarm());
+		expect(alarm).not.toBeNull();
+		expect(alarm!).toBeLessThanOrEqual(before + ROUTE_TTL_MS + 1000);
+
+		// Age one claim past its TTL; the alarm removes it and keeps the other.
+		await runInDurableObject(stub, (_i, state) => {
+			state.storage.sql.exec("UPDATE routes SET created_at = created_at - ? WHERE message = '1'", ROUTE_TTL_MS);
+		});
+		expect(await runDurableObjectAlarm(stub)).toBe(true);
+		const left = await runInDurableObject(stub, (_i, state) => ({
+			routes: state.storage.sql.exec<{ message: string }>("SELECT message FROM routes").toArray().map((r) => r.message),
+			alarm: state.storage.getAlarm(),
+		}));
+		expect(left.routes).toEqual(["2"]);
+		// The next alarm is set for the remaining claim.
+		expect(await left.alarm).not.toBeNull();
 	});
 });
