@@ -1,0 +1,11 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "fta-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "observability": { "enabled": true },
+  "durable_objects": {
+    "bindings": [{ "name": "RELAY", "class_name": "RelayHub" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RelayHub"] }]
+}
