@@ -149,6 +149,8 @@ npm run deploy
 After changing `wrangler.jsonc`, run `npm run cf-typegen` to refresh
 `worker-configuration.d.ts`.
 
-The code lives in `src/index.ts` (Worker routing and webhook size check),
+The code lives in `src/index.ts` (Worker routing and webhook size check;
+it exports only the handler and the Durable Object class, so shared values
+such as the body limit go in `src/constants.ts`),
 `src/relay.ts` (the `RelayHub` Durable Object) and `src/routing.ts` (which
 account an update belongs to).
