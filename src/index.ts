@@ -1,10 +1,9 @@
+import { MAX_WEBHOOK_BYTES, SECRET_HEADER } from "./constants";
 import { ACCOUNT_ID, HEX64, readBodyLimited } from "./util";
 
+// The entry module exports only the fetch handler and the Durable Object
+// class. Constants go in ./constants (see the note there).
 export { RelayHub } from "./relay";
-
-/** Largest webhook body accepted from Telegram. */
-export const MAX_WEBHOOK_BYTES = 64 * 1024;
-export const SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token";
 
 const HOOK_PATH = /^\/hook\/([^/]+)$/;
 const WS_PATH = /^\/ws\/([^/]+)$/;
