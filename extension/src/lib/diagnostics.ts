@@ -1,0 +1,111 @@
+/**
+ * Background diagnostics (debug mode only): a record of what a Fiverr page
+ * does while it is hidden, so we can see which signals still fire there.
+ * Pure helpers live here; the recorder itself is src/content/diagnostics.ts.
+ */
+
+export const DIAG_MAX_ENTRIES = 300;
+/** outerHTML snippets are cut to this length. */
+export const DIAG_SNIPPET_CHARS = 300;
+/** At most this many row/node changes inside one entry, so one big re-render cannot fill the log. */
+export const DIAG_MAX_CHANGES = 6;
+
+export type DiagKind =
+  | 'start' // recorder started on this page
+  | 'stop'
+  | 'visibility' // visibilitychange
+  | 'lifecycle' // focus, blur, freeze, resume, pageshow, pagehide, online, offline
+  | 'heartbeat' // every 5 min; a long gap means timers were throttled or the page was frozen
+  | 'url' // in-app navigation
+  | 'title' // document.title changed
+  | 'toast-container' // ul.realtime-notifications found / lost
+  | 'toast' // mutation inside ul.realtime-notifications
+  | 'list-found'
+  | 'list-lost'
+  | 'list' // rows added, removed or changed in the inbox conversation list
+  | 'list-order' // row order changed
+  | 'chip-found'
+  | 'chip-lost'
+  | 'chip'; // text or attribute change in the "Unread" filter chip
+
+export interface DiagEntry {
+  /** Epoch ms when the event happened in the page (not when it was stored). */
+  t: number;
+  /** document.visibilityState at that moment. */
+  vis: string;
+  /** document.hasFocus() at that moment. */
+  focus: boolean;
+  /** location.pathname. */
+  path: string;
+  kind: DiagKind;
+  data?: Record<string, unknown>;
+  /** Added by the background: the sender tab, and whether it is the watch tab. */
+  tab?: number;
+  watch?: boolean;
+}
+
+/** Collapses whitespace and cuts to `max` characters. */
+export function normText(s: string | null | undefined, max = 200): string {
+  const t = (s ?? '').replace(/\s+/g, ' ').trim();
+  return t.length > max ? `${t.slice(0, max)}…` : t;
+}
+
+/** First DIAG_SNIPPET_CHARS characters of an element's outerHTML (or a text node's text). */
+export function snippet(node: Node | null | undefined): string {
+  if (!node) return '';
+  const raw = node instanceof Element ? node.outerHTML : `#text ${JSON.stringify(node.textContent ?? '')}`;
+  return raw.length > DIAG_SNIPPET_CHARS ? raw.slice(0, DIAG_SNIPPET_CHARS) : raw;
+}
+
+/** Appends entries and keeps the newest DIAG_MAX_ENTRIES. */
+export function appendDiag(log: DiagEntry[], entries: DiagEntry[]): DiagEntry[] {
+  const next = log.concat(entries);
+  return next.length > DIAG_MAX_ENTRIES ? next.slice(next.length - DIAG_MAX_ENTRIES) : next;
+}
+
+const KINDS = new Set<string>([
+  'start', 'stop', 'visibility', 'lifecycle', 'heartbeat', 'url', 'title', 'toast-container', 'toast',
+  'list-found', 'list-lost', 'list', 'list-order', 'chip-found', 'chip-lost', 'chip',
+]);
+
+/** The background accepts only well-formed entries of bounded size from content scripts. */
+export function sanitizeEntries(input: unknown): DiagEntry[] {
+  if (!Array.isArray(input)) return [];
+  const out: DiagEntry[] = [];
+  for (const e of input.slice(0, 100)) {
+    if (!e || typeof e !== 'object') continue;
+    const { t, vis, focus, path, kind, data } = e as Record<string, unknown>;
+    if (typeof t !== 'number' || typeof kind !== 'string' || !KINDS.has(kind)) continue;
+    const entry: DiagEntry = {
+      t,
+      vis: String(vis ?? '').slice(0, 16),
+      focus: Boolean(focus),
+      path: String(path ?? '').slice(0, 200),
+      kind: kind as DiagKind,
+    };
+    if (data && typeof data === 'object') {
+      const json = JSON.stringify(data);
+      entry.data = json.length <= 8000 ? (data as Record<string, unknown>) : { truncated: json.slice(0, 8000) };
+    }
+    out.push(entry);
+  }
+  return out;
+}
+
+/** The text that "Copy diagnostics log" puts on the clipboard: a header, then one line per entry. */
+export function formatDiagnosticsLog(entries: DiagEntry[], meta: { version: string; userAgent: string; watchTabId?: number; now?: number }): string {
+  const now = meta.now ?? Date.now();
+  const header = [
+    `# Fiverr Telegram Alerts background diagnostics`,
+    `# copied ${new Date(now).toISOString()} · extension ${meta.version} · ${entries.length} entries`,
+    `# ${meta.userAgent}`,
+    `# watch tab id: ${meta.watchTabId ?? 'none'}`,
+    `# columns: time | visibility | focus | tab (W = watch tab) | path | kind | data`,
+  ];
+  const lines = entries.map((e) => {
+    const tab = e.tab == null ? '-' : `${e.tab}${e.watch ? 'W' : ''}`;
+    const data = e.data ? JSON.stringify(e.data) : '';
+    return [new Date(e.t).toISOString(), e.vis, e.focus ? 'focus' : 'nofocus', tab, e.path, e.kind, data].join(' | ');
+  });
+  return [...header, ...lines].join('\n');
+}

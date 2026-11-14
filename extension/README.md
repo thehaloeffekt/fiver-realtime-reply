@@ -70,6 +70,27 @@ code assumes it disappears (`src/content/reader.ts`, marked TODO).
 The captures contain buyer names and message text. Remove anything you do not
 want to share before you paste it.
 
+## Background diagnostics (debug mode)
+
+Fiverr does not render toasts in a hidden tab, so the pinned watch tab
+misses them. To find a signal that does fire there, debug mode records, on
+every Fiverr page, with the time and `document.visibilityState`:
+
+- `visibilitychange`, focus/blur, freeze/resume, pageshow/pagehide
+- every `document.title` change
+- every mutation in `ul.realtime-notifications`
+- on `/inbox`: rows added, removed, moved or changed in the conversation
+  list, and every change of the "Unread" filter chip (both found by broad
+  structural matching and logged as 300-character outerHTML snippets,
+  because their selectors are not final)
+- a heartbeat every 5 minutes (a long gap means Chrome throttled or froze the tab)
+
+The recorder only observes. It does not touch `visibilityState`, does not
+inject into the page's main world and does not change the page. The last 300
+entries are kept in `chrome.storage.local`; the popup's **Copy diagnostics
+log** copies them, one line per entry, and lines from the watch tab are
+marked `W`.
+
 ## How it works, and why
 
 **Alerts go straight to Telegram, not through the relay.** The content script
@@ -164,6 +185,7 @@ src/background/commands.ts  /start /check /status, buttons, offline notice
 src/content/observer.ts     toast MutationObservers
 src/content/reader.ts       inbox / conversation reads (placeholder selectors)
 src/content/picker.ts       debug capture picker
+src/content/diagnostics.ts  background diagnostics recorder (debug mode)
 src/entrypoints/            background, content script, popup, options
 tests/                      Vitest: parser, attachment rule, dedupe, callback_data
 ```

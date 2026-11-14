@@ -327,7 +327,7 @@ const SWITCHES: Array<[keyof Settings, string, string]> = [
   ['attachmentAlerts', 'Attachment alerts', 'Also alert for messages that contain only files ("Sent 2 files").'],
   ['unreadCheck', 'Unread check after reload', 'After each watch-tab reload, alert if the unread count went up.'],
   ['keepWatchTab', 'Keep the watch tab open', 'Open the pinned Fiverr inbox tab again if it is closed.'],
-  ['debug', 'Debug mode', 'Show the Debug capture tools in the popup.'],
+  ['debug', 'Debug mode', 'Show the Debug capture tools in the popup, and record background diagnostics on Fiverr pages.'],
 ];
 
 function SettingsTab({ local, session }: { local: LocalState; session: SessionState }) {
