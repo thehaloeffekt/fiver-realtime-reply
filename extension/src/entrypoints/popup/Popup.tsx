@@ -140,7 +140,7 @@ function Main({ local, session }: { local: LocalState; session: SessionState }) 
           {local.recentAlerts.length === 0 ? (
             <div className="small muted">No alerts yet. New Fiverr messages show up here.</div>
           ) : (
-            local.recentAlerts.slice(0, 8).map((a) => <AlertRow key={`${a.at}-${a.username}`} alert={a} now={now} />)
+            local.recentAlerts.slice(0, 8).map((a) => <AlertRow key={`${a.at}-${a.displayName}`} alert={a} now={now} />)
           )}
         </section>
 
@@ -169,7 +169,7 @@ function AlertRow({ alert, now }: { alert: RecentAlert; now: number }) {
       <div className="grow">
         <div className="row" style={{ gap: 6 }}>
           <span className="strong ellipsis">{alert.displayName}</span>
-          <span className="small muted ellipsis grow">@{alert.username}</span>
+          <span className="small muted ellipsis grow">{alert.username ? `@${alert.username}` : ''}</span>
           <span className="small muted">{formatAgo(alert.at, now)}</span>
         </div>
         <div className="row" style={{ gap: 6 }}>

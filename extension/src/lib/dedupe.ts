@@ -1,9 +1,34 @@
 /** Same key inside this window is a duplicate. */
 export const DEDUPE_WINDOW_MS = 20_000;
+/**
+ * A replayed toast (shown when a hidden tab becomes visible again) is a
+ * duplicate if the same message was alerted within this longer window.
+ */
+export const REPLAY_WINDOW_MS = 2 * 60 * 60_000;
 
-/** Builds the dedupe key. The separator cannot appear in accountId or conversationId. */
-export function dedupeKey(accountId: string, conversationId: string, body: string): string {
-  return `${accountId}\u0000${conversationId}\u0000${body}`;
+/** Display name for keys: case and spacing do not matter. */
+export function senderKey(displayName: string): string {
+  return displayName.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/**
+ * Body for keys: lowercase, no whitespace, no trailing "…", first 40
+ * characters. The toast joins text nodes without spaces and the inbox list
+ * joins them with spaces, and a long list preview may be cut (40 letters
+ * still match a preview cut at about 50 characters with spaces); this makes the
+ * same message give the same key from both.
+ */
+export function bodyKey(body: string): string {
+  return body.toLowerCase().replace(/\s+/g, '').replace(/(?:…|\.\.\.)$/, '').slice(0, 40);
+}
+
+/**
+ * Key = account + sender display name + body. Not the toast id: the inbox
+ * list has no toast id, and both detectors must give the same key for the
+ * same message. The separator cannot appear in any part.
+ */
+export function dedupeKey(accountId: string, displayName: string, body: string): string {
+  return `${accountId}\u0000${senderKey(displayName)}\u0000${bodyKey(body)}`;
 }
 
 /**
@@ -19,13 +44,21 @@ export function dedupeKey(accountId: string, conversationId: string, body: strin
 export class Deduper {
   private sent = new Map<string, number>();
 
-  constructor(private readonly windowMs = DEDUPE_WINDOW_MS) {}
+  /**
+   * @param windowMs default duplicate window
+   * @param keepMs how long keys are remembered (at least windowMs), so a
+   *   caller can check a longer window, e.g. for replayed toasts
+   */
+  constructor(
+    private readonly windowMs = DEDUPE_WINDOW_MS,
+    private readonly keepMs = windowMs,
+  ) {}
 
   /** True if the alert should be sent (and records it as sent at `now`). */
-  take(key: string, now: number): boolean {
+  take(key: string, now: number, windowMs = this.windowMs): boolean {
     this.prune(now);
     const at = this.sent.get(key);
-    if (at !== undefined && now - at < this.windowMs) return false;
+    if (at !== undefined && now - at < windowMs) return false;
     this.sent.set(key, now);
     return true;
   }
@@ -40,11 +73,37 @@ export class Deduper {
   }
 
   load(entries: Array<[string, number]>, now: number): void {
-    for (const [k, t] of entries) if (now - t < this.windowMs) this.sent.set(k, t);
+    for (const [k, t] of entries) if (now - t < Math.max(this.windowMs, this.keepMs)) this.sent.set(k, t);
   }
 
   private prune(now: number) {
-    for (const [k, t] of this.sent) if (now - t >= this.windowMs) this.sent.delete(k);
+    const keep = Math.max(this.windowMs, this.keepMs);
+    for (const [k, t] of this.sent) if (now - t >= keep) this.sent.delete(k);
+  }
+}
+
+export type AlertSource = 'toast' | 'list';
+
+/**
+ * For messages whose text the two detectors show differently. A file is
+ * "1 File" in a toast, but the inbox list shows something else (not seen
+ * yet), so their body keys differ. Rule: an alert from one source is a
+ * duplicate if the same sender had an alert from the *other* source within
+ * the window and either of the two was not plain text. Two text messages
+ * with different bodies stay two alerts.
+ */
+export class SenderGate {
+  private last = new Map<string, { at: number; source: AlertSource; text: boolean }>();
+
+  constructor(private readonly windowMs = DEDUPE_WINDOW_MS) {}
+
+  /** True if the alert should be sent (and records it). */
+  take(sender: string, source: AlertSource, text: boolean, now: number): boolean {
+    for (const [k, v] of this.last) if (now - v.at >= this.windowMs) this.last.delete(k);
+    const prev = this.last.get(sender);
+    if (prev && prev.source !== source && (!text || !prev.text)) return false;
+    this.last.set(sender, { at: now, source, text });
+    return true;
   }
 }
 

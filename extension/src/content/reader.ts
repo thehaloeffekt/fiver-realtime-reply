@@ -4,6 +4,7 @@
  * function reports `missing` instead of guessing.
  */
 import type { ConversationMessage, InboxSnapshot, ReadResult } from '../lib/messages';
+import { parseRow } from '../lib/inboxRow';
 import { CONVERSATION, HEADER, INBOX } from '../lib/selectors';
 
 /** Resolves with the first match, or null after `timeoutMs`. */
@@ -42,11 +43,11 @@ async function readUnreadCount(): Promise<ReadResult<number>> {
   return digits ? { ok: true, value: Number(digits[0]) } : { ok: false, error: `badge text "${text(badge)}"` };
 }
 
+/** Names of the unread conversations in the list, top first. */
 async function readUnreadNames(): Promise<ReadResult<string[]>> {
-  if (!INBOX.unreadRow) return { ok: false, missing: 'INBOX.unreadRow' };
-  if (!INBOX.rowName) return { ok: false, missing: 'INBOX.rowName' };
-  const rows = Array.from(document.querySelectorAll(INBOX.unreadRow));
-  return { ok: true, value: rows.map((r) => text(r.querySelector(INBOX.rowName!))).filter(Boolean) };
+  if (!(await waitFor(INBOX.row, 10_000))) return { ok: true, value: [] };
+  const rows = Array.from(document.querySelectorAll(INBOX.row)).map(parseRow);
+  return { ok: true, value: rows.filter((r) => r && r.unread > 0).map((r) => r!.name) };
 }
 
 /** The buyer's last `limit` messages, oldest first. Each attachment becomes "[attachment]". */

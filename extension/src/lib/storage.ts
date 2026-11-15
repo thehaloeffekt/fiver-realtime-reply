@@ -26,6 +26,11 @@ export interface LocalState {
   /** Claims for alerts sent while the relay was down; sent on reconnect. */
   pendingClaims: Array<{ chatId: number; messageId: number }>;
   captures: Partial<Record<CaptureKind, Capture>>;
+  /**
+   * Display name (lowercased) → username, learned from toasts. The inbox list
+   * shows only display names; this lets list alerts link to the conversation.
+   */
+  knownUsers: Record<string, string>;
   /** Background diagnostics (debug mode): the last 300 entries from Fiverr pages. */
   diagnostics: DiagEntry[];
 }
@@ -72,6 +77,7 @@ const LOCAL_DEFAULTS: LocalState = {
   seenUpdateIds: [],
   pendingClaims: [],
   captures: {},
+  knownUsers: {},
   diagnostics: [],
 };
 
