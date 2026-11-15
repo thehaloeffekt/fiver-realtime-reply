@@ -6,9 +6,10 @@ import { connectRelay, relayHeartbeat, retryRelayNow, setRelayHandlers } from '.
 import { connectAndRegisterWebhook, disconnectProfile, onLinked, waitForStart } from '../background/setup';
 import { RELOAD_ALARM, ensureWatchTab, onTabRemoved, reloadAndRead, scheduleReload } from '../background/watchTab';
 import { FIVERR_ORIGIN } from '../lib/constants';
+import { appendDiag, sanitizeEntries, type DiagEntry } from '../lib/diagnostics';
 import { newAccountId } from '../lib/keys';
 import type { ContentToBackground, UiToBackground } from '../lib/messages';
-import { getLocal, isConfigured, setLocal, updateLocal } from '../lib/storage';
+import { getLocal, getSession, isConfigured, setLocal, updateLocal } from '../lib/storage';
 
 const RELAY_ALARM = 'relay-check';
 
@@ -102,6 +103,8 @@ async function handleMessage(msg: ContentToBackground | UiToBackground, sender: 
         return;
       case 'capture':
         return updateLocal('captures', (c) => ({ ...c, [msg.kind]: { at: Date.now(), url: msg.url, html: msg.html.slice(0, 500_000) } }));
+      case 'diag':
+        return recordDiagnostics(msg.entries, sender.tab?.id);
     }
     return;
   }
@@ -132,5 +135,37 @@ async function handleMessage(msg: ContentToBackground | UiToBackground, sender: 
       return scheduleReload();
     case 'profile:disconnect':
       return disconnectProfile();
+    case 'diag:clear':
+      return writeDiagnostics(() => []);
   }
+}
+
+let diagChain: Promise<unknown> = Promise.resolve();
+
+/**
+ * All writes to the diagnostics log go through this one queue, so entries
+ * from several tabs arriving at once are all kept. It reads only the
+ * `diagnostics` key, not the whole storage, because it runs often.
+ */
+function writeDiagnostics(fn: (log: DiagEntry[]) => DiagEntry[]): Promise<void> {
+  const run = diagChain.then(async () => {
+    const { diagnostics } = (await browser.storage.local.get('diagnostics')) as { diagnostics?: DiagEntry[] };
+    await browser.storage.local.set({ diagnostics: fn(diagnostics ?? []) });
+  });
+  diagChain = run.catch(() => undefined);
+  return run;
+}
+
+async function recordDiagnostics(raw: unknown, tabId: number | undefined): Promise<void> {
+  const { settings } = (await browser.storage.local.get('settings')) as { settings?: { debug?: boolean } };
+  if (!settings?.debug) return;
+  const entries = sanitizeEntries(raw);
+  if (!entries.length) return;
+  // Tag each entry with its tab, and whether that tab is the watch tab.
+  const { watchTabId } = await getSession();
+  for (const e of entries) {
+    e.tab = tabId;
+    e.watch = tabId != null && tabId === watchTabId;
+  }
+  await writeDiagnostics((log) => appendDiag(log, entries));
 }

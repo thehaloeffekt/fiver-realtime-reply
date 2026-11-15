@@ -1,3 +1,4 @@
+import type { DiagEntry } from './diagnostics';
 import type { CaptureKind } from './selectors';
 import type { Toast } from './toast';
 
@@ -17,7 +18,8 @@ export interface ConversationMessage {
 export type ContentToBackground =
   | { type: 'toast'; toast: Toast }
   | { type: 'username'; username: string }
-  | { type: 'capture'; kind: CaptureKind; html: string; url: string };
+  | { type: 'capture'; kind: CaptureKind; html: string; url: string }
+  | { type: 'diag'; entries: DiagEntry[] };
 
 /** Background → content script */
 export type BackgroundToContent =
@@ -36,7 +38,8 @@ export type UiToBackground =
   | { type: 'check:now' }
   | { type: 'watch:ensure' }
   | { type: 'watch:reschedule' }
-  | { type: 'profile:disconnect' };
+  | { type: 'profile:disconnect' }
+  | { type: 'diag:clear' };
 
 export interface UiResponse {
   ok: boolean;

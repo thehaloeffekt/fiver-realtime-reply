@@ -1,4 +1,5 @@
 import { browser } from 'wxt/browser';
+import type { DiagEntry } from './diagnostics';
 import type { CaptureKind } from './selectors';
 import { DEFAULT_RELAY_URL } from './constants';
 
@@ -25,6 +26,8 @@ export interface LocalState {
   /** Claims for alerts sent while the relay was down; sent on reconnect. */
   pendingClaims: Array<{ chatId: number; messageId: number }>;
   captures: Partial<Record<CaptureKind, Capture>>;
+  /** Background diagnostics (debug mode): the last 300 entries from Fiverr pages. */
+  diagnostics: DiagEntry[];
 }
 
 export interface Settings {
@@ -69,6 +72,7 @@ const LOCAL_DEFAULTS: LocalState = {
   seenUpdateIds: [],
   pendingClaims: [],
   captures: {},
+  diagnostics: [],
 };
 
 /** chrome.storage.session: cleared when the browser closes. Tab ids are only valid until then. */

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { browser } from 'wxt/browser';
 import { FIVERR_ORIGIN } from '../../lib/constants';
+import { formatDiagnosticsLog } from '../../lib/diagnostics';
 import { formatAgo } from '../../lib/format';
 import type { InboxSnapshot } from '../../lib/messages';
 import { CAPTURE_TARGETS, type CaptureKind } from '../../lib/selectors';
@@ -143,6 +144,7 @@ function Main({ local, session }: { local: LocalState; session: SessionState }) 
           )}
         </section>
 
+        {local.settings.debug && <Diagnostics local={local} session={session} />}
         {local.settings.debug && <DebugCapture local={local} />}
       </div>
 
@@ -247,6 +249,47 @@ function DebugCapture({ local }: { local: LocalState }) {
         );
       })}
       {hint && <div className="help">{hint}</div>}
+    </section>
+  );
+}
+
+/** Debug mode: the background diagnostics log recorded on Fiverr pages. */
+function Diagnostics({ local, session }: { local: LocalState; session: SessionState }) {
+  const [copied, setCopied] = useState(false);
+  const entries = local.diagnostics;
+  const last = entries[entries.length - 1];
+  const hiddenWatch = entries.filter((e) => e.watch && e.vis === 'hidden' && e.kind !== 'heartbeat' && e.kind !== 'visibility' && e.kind !== 'lifecycle').length;
+
+  const copy = async () => {
+    const text = formatDiagnosticsLog(entries, {
+      version: browser.runtime.getManifest().version,
+      userAgent: navigator.userAgent,
+      watchTabId: session.watchTabId,
+    });
+    await navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  return (
+    <section className="card card-pad">
+      <h2 className="card-title">Background diagnostics</h2>
+      <div className="small muted">
+        Recording on every Fiverr page while debug mode is on. The log holds buyer names and message text. Check before you share it.
+      </div>
+      <div className="small" style={{ margin: '8px 0' }}>
+        {entries.length === 0
+          ? 'No entries yet. Reload your Fiverr tabs once after turning on debug mode.'
+          : `${entries.length} of 300 entries · last ${formatAgo(last!.t)} · ${hiddenWatch} page changes in the hidden watch tab`}
+      </div>
+      <div className="row" style={{ gap: 8 }}>
+        <button className="btn btn-sm btn-primary" onClick={() => void copy()} disabled={entries.length === 0}>
+          {copied ? 'Copied' : 'Copy diagnostics log'}
+        </button>
+        <button className="btn btn-sm" onClick={() => void ask({ type: 'diag:clear' })} disabled={entries.length === 0}>
+          Clear
+        </button>
+      </div>
     </section>
   );
 }
