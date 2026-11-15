@@ -30,20 +30,22 @@ export const TOAST_INBOX_PREFIX = 'inbox_';
 export const CONVERSATION_PATH = '/conversations/';
 
 /**
- * Inbox page (https://www.fiverr.com/inbox). PLACEHOLDERS: no HTML sample yet.
+ * Inbox page (https://www.fiverr.com/inbox).
  * Capture with the popup: Debug capture → "Unread badge" and "Inbox list".
  */
 export const INBOX: {
-  /** Element whose text is the unread message count (for example the badge on the inbox icon). */
+  /**
+   * One row of the conversation list. Confirmed from the real hidden-tab
+   * diagnostics log (2026-11-15): `<div role="button" data-testid="contact">`.
+   * Its parent is the list. The row's fields have hashed classes only, so
+   * they are read from the order of its text (src/lib/inboxRow.ts).
+   */
+  row: string;
+  /** Element whose text is the unread message count (for example the badge on the inbox icon). PLACEHOLDER. */
   unreadBadge: string | null;
-  /** One row of the conversation list that is unread. */
-  unreadRow: string | null;
-  /** Inside an unread row: the element with the contact's name. */
-  rowName: string | null;
 } = {
+  row: '[data-testid="contact"]',
   unreadBadge: null, // TODO(capture: unreadBadge)
-  unreadRow: null, // TODO(capture: inboxList)
-  rowName: null, // TODO(capture: inboxList)
 };
 
 /**

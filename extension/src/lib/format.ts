@@ -7,20 +7,30 @@ export function truncate(text: string, max = MAX_BODY_CHARS): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
 
-/** The alert text (parse_mode HTML) and its three buttons. */
-export function formatAlert(label: string, toast: Pick<Toast, 'username' | 'displayName'>, bodyLine: string, accountId: string) {
-  const html = [
-    `<b>${escapeHtml(label)}</b>`,
-    `Message from <b>${escapeHtml(toast.displayName)}</b> (@${escapeHtml(toast.username)})`,
-    escapeHtml(truncate(bodyLine)),
-  ].join('\n');
+/**
+ * The alert text (parse_mode HTML) and its buttons.
+ *
+ * `username` may be empty: the inbox list shows only display names, and the
+ * username is known only if a toast from that buyer was seen before. Then the
+ * "(@user)" part and the "Full message" button (which needs the username to
+ * open the conversation) are left out, and "Open inbox" opens the inbox.
+ * `more` > 0 adds a line when one change stood for several new messages.
+ */
+export function formatAlert(label: string, toast: Pick<Toast, 'username' | 'displayName'>, bodyLine: string, accountId: string, more = 0) {
+  const from = toast.username
+    ? `Message from <b>${escapeHtml(toast.displayName)}</b> (@${escapeHtml(toast.username)})`
+    : `Message from <b>${escapeHtml(toast.displayName)}</b>`;
+  const lines = [`<b>${escapeHtml(label)}</b>`, from, escapeHtml(truncate(bodyLine))];
+  if (more > 0) lines.push(`<i>+${more} earlier ${more === 1 ? 'message' : 'messages'} in this conversation. Check Fiverr.</i>`);
+  const html = lines.join('\n');
 
   const actions = [];
-  const full = encodeCallback(accountId, 'full', toast.username);
+  const full = toast.username ? encodeCallback(accountId, 'full', toast.username) : null;
   if (full) actions.push({ text: 'Full message', callback_data: full });
   actions.push({ text: 'Check now', callback_data: encodeCallback(accountId, 'check', '')! });
 
-  const keyboard: InlineKeyboard = [[{ text: 'Open inbox', url: inboxUrlFor(toast.username) }], actions];
+  const open = toast.username ? inboxUrlFor(toast.username) : INBOX_URL;
+  const keyboard: InlineKeyboard = [[{ text: 'Open inbox', url: open }], actions];
   return { html, keyboard };
 }
 

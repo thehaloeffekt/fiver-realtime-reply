@@ -1,6 +1,6 @@
 import { browser, type Browser } from 'wxt/browser';
 import { defineBackground } from 'wxt/utils/define-background';
-import { afterReload, handleToast, sendTestAlert } from '../background/alerts';
+import { afterReload, handleListMessage, handleToast, sendTestAlert } from '../background/alerts';
 import { handleOffline, handleUpdate } from '../background/commands';
 import { connectRelay, relayHeartbeat, retryRelayNow, setRelayHandlers } from '../background/relay';
 import { connectAndRegisterWebhook, disconnectProfile, onLinked, waitForStart } from '../background/setup';
@@ -98,6 +98,8 @@ async function handleMessage(msg: ContentToBackground | UiToBackground, sender: 
     switch (msg.type) {
       case 'toast':
         return handleToast(msg.toast);
+      case 'listMessage':
+        return handleListMessage(msg.message);
       case 'username':
         if (/^[A-Za-z0-9_.-]{1,64}$/.test(msg.username)) await setLocal({ detectedUsername: msg.username });
         return;

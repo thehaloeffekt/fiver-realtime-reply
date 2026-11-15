@@ -3,6 +3,10 @@ import { isInboxToast, parseToast, type Toast } from '../lib/toast';
 
 /** Wait this long after the last change to a toast before reading it, so React finishes rendering. */
 const SETTLE_MS = 150;
+/** A tab hidden at least this long that becomes visible shows queued toasts... */
+const REPLAY_MIN_HIDDEN_MS = 10_000;
+/** ...during this time after it became visible. Those toasts are replays. */
+const REPLAY_WINDOW_MS = 4000;
 
 /**
  * Watches Fiverr's realtime toast list and calls `onToast` for each new inbox
@@ -21,8 +25,23 @@ export function watchToasts(onToast: (toast: Toast) => void): () => void {
   const dirty = new Set<Element>();
   let flushTimer: ReturnType<typeof setTimeout> | undefined;
 
+  // The real hidden-tab log shows no toast while hidden, then one toast the
+  // moment the tab becomes visible: Fiverr replays what it skipped.
+  let hiddenSince: number | null = document.visibilityState === 'hidden' ? Date.now() : null;
+  let replayUntil = 0;
+  const onVisibility = () => {
+    const now = Date.now();
+    if (document.visibilityState === 'hidden') hiddenSince ??= now;
+    else {
+      if (hiddenSince !== null && now - hiddenSince >= REPLAY_MIN_HIDDEN_MS) replayUntil = now + REPLAY_WINDOW_MS;
+      hiddenSince = null;
+    }
+  };
+  document.addEventListener('visibilitychange', onVisibility);
+
   const flush = () => {
     flushTimer = undefined;
+    const replay = Date.now() <= replayUntil;
     for (const li of dirty) {
       if (!li.isConnected) continue;
       const toast = parseToast(li);
@@ -30,7 +49,7 @@ export function watchToasts(onToast: (toast: Toast) => void): () => void {
       const signature = `${toast.conversationId}\u0000${toast.body}`;
       if (lastSignature.get(li) === signature) continue;
       lastSignature.set(li, signature);
-      onToast(toast);
+      onToast(replay ? { ...toast, replay: true } : toast);
     }
     dirty.clear();
   };
@@ -77,6 +96,7 @@ export function watchToasts(onToast: (toast: Toast) => void): () => void {
   findContainer();
 
   return () => {
+    document.removeEventListener('visibilitychange', onVisibility);
     bodyObserver.disconnect();
     containerObserver?.disconnect();
     clearTimeout(flushTimer);

@@ -9,6 +9,12 @@ export interface Toast {
   displayName: string;
   /** Message text as shown in the toast (trimmed, may be empty). */
   body: string;
+  /**
+   * Shown in the first seconds after a long-hidden tab became visible:
+   * Fiverr catching up on a message that arrived while the tab was hidden.
+   * Set by the observer, not by parseToast.
+   */
+  replay?: boolean;
 }
 
 const ELEMENT_NODE = 1;

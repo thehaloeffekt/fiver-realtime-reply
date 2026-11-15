@@ -1,6 +1,7 @@
 import { browser } from 'wxt/browser';
 import { defineContentScript } from 'wxt/utils/define-content-script';
 import { startDiagnostics } from '../content/diagnostics';
+import { watchInboxList } from '../content/inboxWatcher';
 import { watchToasts } from '../content/observer';
 import type { DiagEntry, DiagKind } from '../lib/diagnostics';
 import { startPicker } from '../content/picker';
@@ -22,6 +23,11 @@ export default defineContentScript({
 
     const stopToasts = watchToasts((toast) => send({ type: 'toast', toast }));
     ctx.onInvalidated(stopToasts); // extension reloaded or updated
+
+    // Second detector: the /inbox conversation list stays live in a hidden
+    // tab, where Fiverr does not render toasts. Idle on pages without it.
+    const stopList = watchInboxList((message) => send({ type: 'listMessage', message }));
+    ctx.onInvalidated(stopList);
 
     const username = readLoggedInUsername();
     if (username) send({ type: 'username', username });

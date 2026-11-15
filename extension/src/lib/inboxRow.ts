@@ -1,0 +1,98 @@
+/**
+ * Parses one row of the /inbox conversation list.
+ *
+ * The row (`[data-testid="contact"]`) has hashed class names only, so it is
+ * read by the order of its text pieces, as seen in the real hidden-tab log:
+ *
+ *   "M · Miracle R · Just now · Great what's the update · 1"
+ *    │    │           │          │                         └ unread count (only when unread)
+ *    │    │           │          └ preview of the last message
+ *    │    │           └ relative time
+ *    │    └ display name (the piece right before the time)
+ *    └ avatar initial (only when there is no photo)
+ *
+ *   "M · Miracle R · 1 minute · Me: · Yep I've gotten it…"   last message is mine
+ *   "M · Miracle R · 3 minutes · Typing... · 2"              buyer is typing
+ *
+ * The time piece is the anchor: everything before it is the name, everything
+ * after it is the message. A row without a recognisable time is not parsed.
+ */
+
+/** A new incoming message seen in the inbox list (content script → background). */
+export interface ListMessage {
+  displayName: string;
+  /** Preview text of the newest message. */
+  body: string;
+  /** How many new messages this change stands for (unread count delta, at least 1). */
+  count: number;
+}
+
+export interface InboxRow {
+  /** Display name, as in the toast's strong.display-name. */
+  name: string;
+  /** Relative time text, e.g. "Just now", "3 minutes". */
+  time: string;
+  /** Unread count badge; 0 when the row has none. */
+  unread: number;
+  /** The last message was sent by the logged-in seller ("Me:"). */
+  mine: boolean;
+  /** "Typing..." is shown instead of the preview. */
+  typing: boolean;
+  /** Last message preview, without the "Me:" prefix. May be empty. */
+  preview: string;
+}
+
+const UNITS = '(?:sec|second|min|minute|hr|hour|day|week|wk|month|mo|year|yr)s?';
+/** Relative or short-date times. Observed: "Just now", "1 minute", "19 hours", "6 days", "4 weeks", "5 months". */
+const TIME = new RegExp(
+  `^(?:just now|now|yesterday|today|an? ${UNITS}(?: ago)?|\\d+\\s*${UNITS}(?: ago)?|[A-Z][a-z]{2,8}\\.? \\d{1,2}(?:, \\d{4})?|\\d{1,2}[/.]\\d{1,2}(?:[/.]\\d{2,4})?)$`,
+  'i',
+);
+const COUNT = /^(\d{1,3})\+?$/;
+const TYPING = /^typing(?:\.\.\.|…)?$/i;
+const ME = /^me:\s*/i;
+
+export function isTimeText(s: string): boolean {
+  return TIME.test(s.trim());
+}
+
+/** The row's text nodes, trimmed, in document order. */
+export function rowPieces(row: Element): string[] {
+  const out: string[] = [];
+  const walker = row.ownerDocument.createTreeWalker(row, 4 /* NodeFilter.SHOW_TEXT */);
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    if (n.parentElement?.closest('script,style')) continue;
+    const t = (n.nodeValue ?? '').replace(/\s+/g, ' ').trim();
+    if (t) out.push(t);
+  }
+  return out;
+}
+
+export function parseRowPieces(pieces: string[]): InboxRow | null {
+  // The first time-like piece that has a name before it.
+  const t = pieces.findIndex((p, i) => i >= 1 && isTimeText(p));
+  if (t < 1) return null;
+  const name = pieces[t - 1]!;
+  const after = pieces.slice(t + 1);
+
+  let unread = 0;
+  const last = after[after.length - 1];
+  if (last !== undefined && COUNT.test(last)) {
+    unread = Number(COUNT.exec(last)![1]);
+    after.pop();
+  }
+
+  let mine = false;
+  if (after[0] !== undefined && ME.test(after[0])) {
+    mine = true;
+    after[0] = after[0].replace(ME, '');
+    if (!after[0]) after.shift();
+  }
+
+  const preview = after.join(' ').trim();
+  return { name, time: pieces[t]!, unread, mine, typing: TYPING.test(preview), preview };
+}
+
+export function parseRow(row: Element): InboxRow | null {
+  return parseRowPieces(rowPieces(row));
+}

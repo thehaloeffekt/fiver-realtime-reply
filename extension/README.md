@@ -45,7 +45,7 @@ reload open Fiverr tabs (old content scripts stop when the extension reloads).
 
 ## What I need you to capture
 
-Four areas have placeholder selectors in `src/lib/selectors.ts` because there
+Three areas still have placeholder selectors in `src/lib/selectors.ts` because there
 is no real HTML sample yet. Until they are filled in, the related features
 answer "selector … is not set up" instead of guessing. Alerts from toasts do
 not depend on any of them.
@@ -60,7 +60,7 @@ it again.
 | Capture | Page | What to click | Fills |
 | --- | --- | --- | --- |
 | Unread badge | Any Fiverr page with at least 1 unread message | The number on the inbox (envelope) icon in the top bar | `INBOX.unreadBadge` |
-| Inbox list | `fiverr.com/inbox` with 1 or more unread conversations **and** 1 or more read ones | One row, then `↑` until the outline covers the whole list | `INBOX.unreadRow`, `INBOX.rowName` |
+| Inbox list (optional now) | `fiverr.com/inbox` with 1 or more unread conversations **and** 1 or more read ones | One row, then `↑` until the outline covers the whole list | Confirms the row fields; rows are read by text order today (`src/lib/inboxRow.ts`) |
 | Conversation messages | `fiverr.com/inbox/<buyer>` with messages from both sides, at least one file or image, and one text + file message | One message, then `↑` until the outline covers the thread | `CONVERSATION.*` |
 | Account menu | Any Fiverr page, logged in | Your avatar or username in the top bar | `HEADER.loggedInUsername` (default account label) |
 
@@ -126,12 +126,42 @@ inside `<p class="content">`. If that markup is ever parsed from HTML text,
 the browser closes the `<p>` early and the text moves next to the div. The
 parser handles both shapes (both are tested).
 
-**Dedupe: same account + conversation + body within 20 s.** Several Fiverr
-tabs show the same toast at once; they collapse into one alert. The window is
-short, so a buyer who sends "ok?" again ten minutes later still alerts you. The
-check and the record happen in one synchronous step, so two tabs reporting in
-the same tick cannot both pass. If the send fails, the key is released so a
-copy from another tab can retry.
+**Two detectors: toasts, and the inbox list for hidden tabs.** Fiverr does
+not render toasts in a hidden tab, so the pinned watch tab (normally hidden)
+saw nothing. The diagnostics log of a real hidden-tab test showed that the
+`/inbox` conversation list stays live there: within seconds of each message
+the buyer's row (`[data-testid="contact"]`) shows the new preview and a higher
+unread count. `src/content/inboxWatcher.ts` alerts when a row that is not
+"Me:" and not "Typing..." is unread and its count went up or its preview
+changed. Rows present when the list appears are the baseline and never alert;
+state is kept per display name, so a re-render does not look new. It works
+inside the MutationObserver callback with no timers, because hidden tabs
+delay timers by up to a minute but deliver observer callbacks at once.
+
+The row has only hashed class names, so its fields are read from the order of
+its text, anchored on the relative time: the piece before the time is the
+name; after it come an optional "Me:", the preview, and the unread count.
+
+**Dedupe: same account + sender + body within 20 s.** The toast and the list
+report the same message, and several tabs show the same toast; they collapse
+into one alert. The key uses the display name (the list shows no username)
+and the first 40 letters of the body, ignoring case and spaces, because the
+two sources space the text differently. The window is short, so a buyer who
+sends "ok?" again ten minutes later still alerts you. The check and the record
+happen in one synchronous step, so two reports in the same tick cannot both
+pass. If the send fails, the key is released so another copy can retry.
+
+A toast that appears in the first seconds after a long-hidden tab becomes
+visible is Fiverr replaying a message it skipped while hidden. It is checked
+against the last 2 hours instead of 20 s, so it does not repeat an alert the
+list already sent, but it still alerts if nothing did. Files appear as
+"1 File" in a toast but differently in the list, so for non-text messages an
+alert from the other detector for the same sender within 20 s also counts as
+a duplicate.
+
+Display name → username pairs are learned from toasts. A list alert for a
+buyer seen in a toast before gets "(@user)", "Full message" and a direct
+"Open inbox" link; otherwise it has the name, the text and "Check now".
 
 **Updates are acked before work starts.** The relay holds at most 50 updates
 per bot; a "Full message" read can take 20 s. The extension also keeps the last
@@ -174,15 +204,17 @@ they appear exactly once.
 ```
 src/lib/selectors.ts        all Fiverr selectors (placeholders marked TODO)
 src/lib/toast.ts            toast parser + attachment / empty-body rule
-src/lib/dedupe.ts           20 s dedupe, last-200 update ids
+src/lib/dedupe.ts           dedupe key, 20 s / replay windows, sender gate, last-200 update ids
+src/lib/inboxRow.ts         inbox list row parser (text order)
 src/lib/callback.ts         callback_data format
 src/lib/telegram.ts         Bot API client (text only), retries with backoff
 src/lib/format.ts           alert text and buttons
 src/background/relay.ts     WebSocket client: auth, ping, ack, claims, backoff
 src/background/watchTab.ts  pinned tab, reload alarm, reads, job queue
-src/background/alerts.ts    toast → Telegram, unread-count alert
+src/background/alerts.ts    toast / list message → Telegram, unread-count alert
 src/background/commands.ts  /start /check /status, buttons, offline notice
-src/content/observer.ts     toast MutationObservers
+src/content/observer.ts     toast MutationObservers, replay flag
+src/content/inboxWatcher.ts inbox list detector (works in hidden tabs)
 src/content/reader.ts       inbox / conversation reads (placeholder selectors)
 src/content/picker.ts       debug capture picker
 src/content/diagnostics.ts  background diagnostics recorder (debug mode)

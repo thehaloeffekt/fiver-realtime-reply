@@ -1,3 +1,4 @@
+import type { ListMessage } from './inboxRow';
 import type { DiagEntry } from './diagnostics';
 import type { CaptureKind } from './selectors';
 import type { Toast } from './toast';
@@ -19,7 +20,8 @@ export type ContentToBackground =
   | { type: 'toast'; toast: Toast }
   | { type: 'username'; username: string }
   | { type: 'capture'; kind: CaptureKind; html: string; url: string }
-  | { type: 'diag'; entries: DiagEntry[] };
+  | { type: 'diag'; entries: DiagEntry[] }
+  | { type: 'listMessage'; message: ListMessage };
 
 /** Background → content script */
 export type BackgroundToContent =

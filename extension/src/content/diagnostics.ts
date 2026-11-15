@@ -12,6 +12,7 @@
  * below) and logged as outerHTML snippets to pick real selectors from.
  */
 import { DIAG_MAX_CHANGES, normText, snippet, type DiagEntry, type DiagKind } from '../lib/diagnostics';
+import { parseRow } from '../lib/inboxRow';
 import { TOAST } from '../lib/selectors';
 import { isInboxToast } from '../lib/toast';
 
@@ -123,6 +124,10 @@ export function rowKey(row: Element): string {
   const links = row.matches('a[href]') ? [row] : Array.from(row.querySelectorAll('a[href]'));
   const link = links.find((a) => isConversationHref(a.getAttribute('href')));
   if (link) return new URL(link.getAttribute('href')!, 'https://www.fiverr.com').pathname;
+  // Inbox rows have no link; their text includes the relative time, which
+  // changes every minute, so key them by display name instead.
+  const parsed = parseRow(row);
+  if (parsed) return `name:${parsed.name}`;
   return `text:${rowText(row, 40)}`;
 }
 
