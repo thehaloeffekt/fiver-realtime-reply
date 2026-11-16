@@ -212,16 +212,18 @@ export function readBuyerHeader(username: string, now: number, root: ParentNode 
 }
 
 /**
- * The buyer's country from the About panel, if the page shows one: the text
- * right after a label that says exactly "From". Not confirmed from a capture
- * yet, so it only accepts a short plain name.
+ * The buyer's country from the details pane: the list item whose label is
+ * exactly "From". '' when the pane is closed or has no such row. Only a
+ * short plain name is accepted.
  */
 export function readCountry(root: ParentNode = document): string {
-  for (const el of Array.from(root.querySelectorAll(CONVERSATION_HEADER.aboutLabel))) {
-    if (oneLine(el.textContent) !== CONVERSATION_HEADER.aboutFrom) continue;
-    const next = el.nextElementSibling ?? el.parentElement?.nextElementSibling ?? null;
-    const value = oneLine(next?.textContent);
-    if (/^[\p{L}][\p{L} .,'()&-]{1,59}$/u.test(value)) return value;
+  const H = CONVERSATION_HEADER;
+  for (const pane of Array.from(root.querySelectorAll(H.detailsPane))) {
+    for (const item of Array.from(pane.querySelectorAll(H.detailsItem))) {
+      if (oneLine(item.querySelector(H.detailsLabel)?.textContent) !== H.fromLabel) continue;
+      const value = oneLine(item.querySelector(H.detailsValue)?.textContent);
+      if (/^[\p{L}][\p{L} .,'()&-]{1,59}$/u.test(value)) return value;
+    }
   }
   return '';
 }

@@ -109,12 +109,18 @@ export const CONVERSATION_HEADER = {
   clock: 'time',
   clockLabel: '(local time)',
   /**
-   * About panel: a label "From" and the country after it. NOT confirmed
-   * from a capture yet; read only when a typography element says exactly
-   * "From", otherwise ignored.
+   * The details pane on the right ("Overview" → "About"). Confirmed from a
+   * real capture (tests/fixtures/details-pane.html): each fact is an
+   * `li[data-track-tag="list_item"]` with the label in a
+   * `p[data-track-tag="text"]` ("From") and the value in a
+   * `p[data-track-tag="typography"]` ("United Kingdom"). The pane is missing
+   * when the user closed the sidebar.
    */
-  aboutLabel: '[data-track-tag="typography"]',
-  aboutFrom: 'From',
+  detailsPane: '[data-testid="details-pane"]',
+  detailsItem: 'li[data-track-tag="list_item"]',
+  detailsLabel: 'p[data-track-tag="text"]',
+  detailsValue: 'p[data-track-tag="typography"]',
+  fromLabel: 'From',
 } as const;
 
 /** Interface text that may sit inside a message but is not the buyer's words. */

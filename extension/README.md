@@ -211,9 +211,12 @@ no date, so the offset is only known modulo 24 h; it is put in −10:00…+13:45
 which keeps Hawaii (−10) and reads −11/−12 as +13/+12 (New Zealand, Fiji,
 Tonga), so every result is in −12…+14. It is re-read on every page change,
 when the clock is current. An offset older than 30 days is still used but
-shown with `?` (daylight saving may have changed it). The country comes from an
-About panel row "From", when the page shows one (not yet confirmed from a
-capture). The extension never opens a conversation just to learn the zone,
+shown with `?` (daylight saving may have changed it). The country comes from the
+details pane on the right (`[data-testid="details-pane"]`): the
+`li[data-track-tag="list_item"]` whose `p[data-track-tag="text"]` label is
+"From", value in its `p[data-track-tag="typography"]` (confirmed from a
+capture). If you closed that sidebar there is no country; one read earlier is
+kept. The extension never opens a conversation just to learn the zone,
 because opening it marks it read. Alerts get a last line `Buyer time: 9:54 AM`
 when the offset for that buyer is known.
 

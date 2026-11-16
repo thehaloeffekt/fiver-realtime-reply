@@ -131,11 +131,38 @@ describe('conversation header capture', () => {
     expect(conversationUsername('/users/buyer_one')).toBe('');
   });
 
-  it('reads the country from a "From" row when there is one (made-up markup)', () => {
-    document.body.innerHTML = fixture('conversation.html') + '<aside><div><p data-track-tag="typography">From</p><p data-track-tag="typography">United Kingdom</p></div></aside>';
-    expect(readCountry()).toBe('United Kingdom');
-    expect(readBuyerHeader('buyer_one', at('2026-11-16T02:57:30Z'))?.country).toBe('United Kingdom');
+  it('details pane capture: reads the country from the "From" row', () => {
+    document.body.innerHTML = fixture('conversation.html') + fixture('details-pane.html');
+    expect(readCountry()).toBe('Example Country');
+    expect(readBuyerHeader('buyer_one', at('2026-11-16T02:57:30Z'))).toEqual({ username: 'buyer_one', offset: 0, clock: '2:57 AM', country: 'Example Country' });
+  });
+
+  it('no country when the sidebar is closed, or the pane has no "From" row', () => {
     document.body.innerHTML = fixture('conversation.html');
+    expect(readCountry()).toBe('');
+    expect(readBuyerHeader('buyer_one', at('2026-11-16T02:57:30Z'))).not.toHaveProperty('country');
+    document.body.innerHTML = fixture('details-pane.html');
+    const from = Array.from(document.querySelectorAll('p[data-track-tag="text"]')).find((p) => p.textContent === 'From')!;
+    from.textContent = 'Language';
+    expect(readCountry()).toBe('');
+  });
+
+  it('other rows of the pane are never taken for the country ("English: Fluent", "On Fiverr since")', () => {
+    document.body.innerHTML = fixture('details-pane.html');
+    document.querySelector('ul[data-track-tag="list"]')!.lastElementChild!.remove(); // drop "From"
+    expect(readCountry()).toBe('');
+  });
+
+  it('does not use hashed class names: the pane parses with every class removed', () => {
+    document.body.innerHTML = fixture('details-pane.html');
+    for (const el of Array.from(document.querySelectorAll('[class]'))) el.removeAttribute('class');
+    expect(readCountry()).toBe('Example Country');
+  });
+
+  it('rejects a value that is not a plain place name', () => {
+    document.body.innerHTML = fixture('details-pane.html');
+    const value = Array.from(document.querySelectorAll('p[data-track-tag="typography"]')).find((p) => p.textContent === 'Example Country')!;
+    value.textContent = '<b>12345</b> https://x';
     expect(readCountry()).toBe('');
   });
 });
@@ -172,8 +199,8 @@ describe('Full message with my time and the buyer time', () => {
   });
 
   it('top line: buyer local time now, offset and country', () => {
-    const html = fullReplyText('Main', 'some_buyer', 'line', { ...uk, country: 'United Kingdom' }, now, 'Europe/Paris');
-    expect(html.split('\n').slice(0, 3)).toEqual(['<b>Main</b>: last messages from <b>@some_buyer</b>', 'Buyer local time now: 9:54 AM (UTC+0, United Kingdom)', 'line']);
+    const html = fullReplyText('Main', 'some_buyer', 'line', { ...uk, country: 'Example Country' }, now, 'Europe/Paris');
+    expect(html.split('\n').slice(0, 3)).toEqual(['<b>Main</b>: last messages from <b>@some_buyer</b>', 'Buyer local time now: 9:54 AM (UTC+0, Example Country)', 'line']);
     expect(fullReplyText('Main', 'some_buyer', 'line', null, now).split('\n')[1]).toBe('line');
   });
 
