@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { formatCheck, formatConversation } from '../src/background/commands';
 import { buyerMessages, parseConversation, readLoggedInUsername, readRows, readUnreadChip } from '../src/content/reader';
 import { parseRow, parseRowStructure } from '../src/lib/inboxRow';
+import { formatMine, messageSentAt } from '../src/lib/buyerTime';
 import { formatAlert } from '../src/lib/format';
 
 // Fixtures are imported as text by Vite (`?raw`), no file system access needed
@@ -36,7 +37,7 @@ describe('inbox list capture', () => {
       ['client_six', 'client_six', '5 months', 2, false],
       ['client_seven', 'client_seven', '5 months', 2, false],
     ]);
-    expect(value[0]!.preview).toBe('kindly check it out when you wake up');
+    expect(value[0]!.preview).toBe('please review the draft tomorrow');
   });
 
   it('strips the "Me: " span and keeps the line breaks of a long preview', () => {
@@ -58,7 +59,7 @@ describe('inbox list capture', () => {
   it('reads a single row capture (with the hover menu open)', () => {
     load(fixture('inbox-row.html'));
     const row = document.querySelector('[data-testid="contact"]')!;
-    expect(parseRowStructure(row)).toMatchObject({ username: 'buyer_one', name: 'Buyer One', time: '5 minutes', unread: 4, preview: 'kindly check it out when you wake up' });
+    expect(parseRowStructure(row)).toMatchObject({ username: 'buyer_one', name: 'Buyer One', time: '5 minutes', unread: 4, preview: 'please review the draft tomorrow' });
   });
 
   it('does not use hashed class names: the row parses with every class removed', () => {
@@ -74,7 +75,7 @@ describe('inbox list capture', () => {
     load(fixture('inbox-row.html'));
     const row = document.querySelector('[data-testid="contact"]')!;
     row.querySelector('.contact-excerpt')!.classList.remove('contact-excerpt');
-    expect(parseRow(row)).toMatchObject({ username: '', name: 'Buyer One', unread: 4, preview: 'kindly check it out when you wake up' });
+    expect(parseRow(row)).toMatchObject({ username: '', name: 'Buyer One', unread: 4, preview: 'please review the draft tomorrow' });
   });
 });
 
@@ -116,7 +117,7 @@ describe('/check and Check now', () => {
 
 describe('list alerts with the username', () => {
   it('have "(@user)", Full message and a direct Open inbox link', () => {
-    const { html, keyboard } = formatAlert('my_seller', { username: 'buyer_one', displayName: 'Buyer One' }, 'kindly check it out', 'acc1');
+    const { html, keyboard } = formatAlert('my_seller', { username: 'buyer_one', displayName: 'Buyer One' }, 'please review the draft', 'acc1');
     expect(html).toContain('(@buyer_one)');
     expect(keyboard[0]![0]).toEqual({ text: 'Open inbox', url: 'https://www.fiverr.com/inbox/buyer_one' });
     expect(keyboard[1]!.map((b) => b.text)).toEqual(['Full message', 'Check now']);
@@ -147,10 +148,10 @@ describe('conversation capture', () => {
     const all = parseConversation();
     expect(all).toHaveLength(30);
     expect(all[0]).toMatchObject({ sender: 'my_seller', me: true, time: 'Oct 06, 9:25 AM' });
-    expect(all[4]).toMatchObject({ sender: 'buyer_one', me: false, time: 'Nov 13, 1:49 AM', text: 'hey', files: [] }); // had "Translate to English"
-    expect(all[14]).toMatchObject({ text: 'take a look at this logo', files: ['logo-draft.png'] });
+    expect(all[4]).toMatchObject({ sender: 'buyer_one', me: false, time: 'Nov 13, 1:49 AM', text: 'hello', files: [] }); // had "Translate to English"
+    expect(all[14]).toMatchObject({ text: 'see the attached sketch', files: ['logo-draft.png'] });
     expect(all[15]).toMatchObject({ text: '', files: ['website.zip'] }); // body was "1 File"
-    expect(all[29]).toMatchObject({ text: 'kindly check it out when you wake up', time: 'Nov 15, 9:51 PM' });
+    expect(all[29]).toMatchObject({ text: 'please review the draft tomorrow', time: 'Nov 15, 9:51 PM' });
     for (const m of all) {
       expect(m.text).not.toMatch(/Translate to English|Create an offer|Buyer One|^Me$/);
       expect(m.id).toMatch(/_/);
@@ -162,18 +163,22 @@ describe('conversation capture', () => {
     const last = buyerMessages(parseConversation(), 10, 'my_seller');
     expect(last).toHaveLength(10);
     expect(last.every((m) => m.id)).toBe(true);
-    expect(formatConversation(last).split('\n')).toEqual([
-      "<i>Nov 14, 4:20 PM</i>: Hi! How's it going",
-      '<i>Nov 14, 4:32 PM</i>: Just checking in again',
-      '<i>Nov 14, 4:34 PM</i>: Have you made sense of the website yet',
-      "<i>Nov 15, 11:30 AM</i>: Great what's the update",
-      "<i>Nov 15, 11:33 AM</i>: Here's some more info [file: 10.pdf]",
-      '<i>Nov 15, 11:36 AM</i>: Gotten it yet?',
-      '<i>Nov 15, 9:45 PM</i>: Hi any update',
-      '<i>Nov 15, 9:47 PM</i>: [file: 01_initial_brief.txt]',
-      "<i>Nov 15, 9:49 PM</i>: Sorry here's the right file [file: 10.pdf]",
-      '<i>Nov 15, 9:51 PM</i>: kindly check it out when you wake up',
+    // The account's zone was UTC-5: the time from each message id, shown in
+    // that zone, is exactly the time the page showed. So the ids carry the
+    // real send time.
+    expect(formatConversation(last, null, Date.UTC(2026, 10, 16, 3), 'America/New_York').split('\n')).toEqual([
+      "<i>Nov 14, 4:20 PM</i>: Hello, how is the work going",
+      '<i>Nov 14, 4:32 PM</i>: Checking in once more',
+      '<i>Nov 14, 4:34 PM</i>: Did the site files make sense',
+      "<i>Nov 15, 11:30 AM</i>: Good, any news",
+      "<i>Nov 15, 11:33 AM</i>: Extra details attached [file: brief-a.pdf]",
+      '<i>Nov 15, 11:36 AM</i>: Did you receive it?',
+      '<i>Nov 15, 9:45 PM</i>: Any progress today',
+      '<i>Nov 15, 9:47 PM</i>: [file: notes-b.txt]',
+      "<i>Nov 15, 9:49 PM</i>: Correct file attached now [file: brief-a.pdf]",
+      '<i>Nov 15, 9:51 PM</i>: please review the draft tomorrow',
     ]);
+    for (const m of last) expect(formatMine(messageSentAt(m.id)!, 'America/New_York')).toBe(m.time);
   });
 
   it('tells my messages apart by the "Me" name even without my username', () => {

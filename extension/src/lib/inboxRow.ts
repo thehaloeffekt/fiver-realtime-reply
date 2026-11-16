@@ -8,7 +8,7 @@
  * Fallback (parseRowPieces): the order of the row's text, as seen in the
  * real hidden-tab log, in case Fiverr drops the attributes:
  *
- *   "M · Miracle R · Just now · Great what's the update · 1"
+ *   "M · Buyer One · Just now · Good, any news · 1"
  *    │    │           │          │                         └ unread count (only when unread)
  *    │    │           │          └ preview of the last message
  *    │    │           └ relative time

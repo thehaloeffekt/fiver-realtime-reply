@@ -15,13 +15,15 @@ export function truncate(text: string, max = MAX_BODY_CHARS): string {
  * "(@user)" part and the "Full message" button (which needs the username to
  * open the conversation) are left out, and "Open inbox" opens the inbox.
  * `more` > 0 adds a line when one change stood for several new messages.
+ * `buyerTime` (the buyer's local time now, when their offset is known) is the last line.
  */
-export function formatAlert(label: string, toast: Pick<Toast, 'username' | 'displayName'>, bodyLine: string, accountId: string, more = 0) {
+export function formatAlert(label: string, toast: Pick<Toast, 'username' | 'displayName'>, bodyLine: string, accountId: string, more = 0, buyerTime?: string) {
   const from = toast.username
     ? `Message from <b>${escapeHtml(toast.displayName)}</b> (@${escapeHtml(toast.username)})`
     : `Message from <b>${escapeHtml(toast.displayName)}</b>`;
   const lines = [`<b>${escapeHtml(label)}</b>`, from, escapeHtml(truncate(bodyLine))];
   if (more > 0) lines.push(`<i>+${more} earlier ${more === 1 ? 'message' : 'messages'} in this conversation. Check Fiverr.</i>`);
+  if (buyerTime) lines.push(`Buyer time: ${escapeHtml(buyerTime)}`);
   const html = lines.join('\n');
 
   const actions = [];

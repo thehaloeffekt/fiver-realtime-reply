@@ -129,8 +129,8 @@ describe('watchInboxList on the real list markup', () => {
 
 describe('dedupe on the username', () => {
   it('toast and list give the same key; same display name, different usernames do not', () => {
-    const toast = dedupeKey('acc', senderId('buyer_one', 'Buyer One'), 'kindly check it out when you wake up');
-    const list = dedupeKey('acc', senderId('Buyer_One', 'Someone else'), 'kindly check it out when you wake up');
+    const toast = dedupeKey('acc', senderId('buyer_one', 'Buyer One'), 'please review the draft tomorrow');
+    const list = dedupeKey('acc', senderId('Buyer_One', 'Someone else'), 'please review the draft tomorrow');
     expect(toast).toBe(list);
     const d = new Deduper();
     expect(d.take(dedupeKey('acc', senderId('sam_a', 'Sam'), 'hi'), 0)).toBe(true);
@@ -139,7 +139,7 @@ describe('dedupe on the username', () => {
 });
 
 describe('Linked message', () => {
-  const base: LocalState = { relayUrl: '', settings: DEFAULT_SETTINGS, recentAlerts: [], seenUpdateIds: [], pendingClaims: [], captures: {}, knownUsers: {}, diagnostics: [] };
+  const base: LocalState = { relayUrl: '', settings: DEFAULT_SETTINGS, recentAlerts: [], seenUpdateIds: [], pendingClaims: [], captures: {}, knownUsers: {}, buyerZones: {}, diagnostics: [] };
 
   it('never shows the "Fiverr account" placeholder', () => {
     expect(linkedText(base)).not.toContain('Fiverr account');

@@ -5,7 +5,7 @@ import { formatDiagnosticsLog } from '../../lib/diagnostics';
 import { formatAgo } from '../../lib/format';
 import type { InboxSnapshot } from '../../lib/messages';
 import { CAPTURE_TARGETS, type CaptureKind } from '../../lib/selectors';
-import { isConfigured, labelOf, patchSettings, type LocalState, type RecentAlert, type SessionState } from '../../lib/storage';
+import { isConfigured, labelOf, type LocalState, type RecentAlert, type SessionState } from '../../lib/storage';
 import { Badge, Dot, Logo, Spinner, Switch } from '../../ui/components';
 import { ask, useLocal, useNow, useSession } from '../../ui/hooks';
 import { AlertIcon, GearIcon, RefreshIcon } from '../../ui/icons';
@@ -32,13 +32,21 @@ function Header({ local }: { local: LocalState }) {
       <Logo />
       <div className="grow">
         <div className="strong">Fiverr Telegram Alerts</div>
-        <div className="small muted ellipsis">{configured ? labelOf(local) : 'Not set up'}</div>
+        <div className="small muted ellipsis">
+          {configured ? labelOf(local) : 'Not set up'}
+          {configured && !local.settings.sendAlerts && (
+            <>
+              {' '}
+              <Badge tone="warn">Paused</Badge>
+            </>
+          )}
+        </div>
       </div>
       <Switch
         label={local.settings.sendAlerts ? 'Alerts on' : 'Alerts paused'}
         checked={configured && local.settings.sendAlerts}
         disabled={!configured}
-        onChange={(v) => void patchSettings({ sendAlerts: v })}
+        onChange={(v) => void ask({ type: 'alerts:set', on: v })}
       />
     </header>
   );
@@ -115,6 +123,18 @@ function Main({ local, session }: { local: LocalState; session: SessionState }) 
             <div className="grow small">{problem.text}</div>
             <button className="btn btn-sm" onClick={fix} disabled={retrying}>
               {retrying ? <Spinner /> : problem.kind === 'telegram' ? 'Fix' : problem.kind === 'watch' ? 'Open' : 'Retry'}
+            </button>
+          </div>
+        )}
+
+        {!local.settings.sendAlerts && (
+          <div className="banner" role="status">
+            <AlertIcon />
+            <div className="grow small">
+              <b>Paused.</b> No alerts are sent for this account. Messages that arrive while paused are not sent later.
+            </div>
+            <button className="btn btn-sm" onClick={() => void ask({ type: 'alerts:set', on: true })}>
+              Resume
             </button>
           </div>
         )}

@@ -8,11 +8,11 @@ const split = (s: string) => s.split(' · ');
 
 describe('parseRowPieces (real rows from the log)', () => {
   it.each([
-    ['M · Miracle R · Just now · Great what\'s the update · 1', { name: 'Miracle R', unread: 1, mine: false, typing: false, preview: "Great what's the update" }],
-    ['M · Miracle R · 3 minutes · Typing... · 2', { name: 'Miracle R', unread: 2, typing: true }],
-    ['M · Miracle R · 19 hours · Typing...', { name: 'Miracle R', unread: 0, typing: true }],
-    ['M · Miracle R · Just now · Gotten it yet?', { name: 'Miracle R', unread: 0, preview: 'Gotten it yet?' }],
-    ["M · Miracle R · 1 minute · Me: · Yep I've gotten it. Will update you soon", { name: 'Miracle R', unread: 0, mine: true, preview: "Yep I've gotten it. Will update you soon" }],
+    ['M · Buyer One · Just now · Good, any news · 1', { name: 'Buyer One', unread: 1, mine: false, typing: false, preview: "Good, any news" }],
+    ['M · Buyer One · 3 minutes · Typing... · 2', { name: 'Buyer One', unread: 2, typing: true }],
+    ['M · Buyer One · 19 hours · Typing...', { name: 'Buyer One', unread: 0, typing: true }],
+    ['M · Buyer One · Just now · Did you receive it?', { name: 'Buyer One', unread: 0, preview: 'Did you receive it?' }],
+    ["M · Buyer One · 1 minute · Me: · Sample text fourteen", { name: 'Buyer One', unread: 0, mine: true, preview: "Sample text fourteen" }],
     ["R · Robert · 4 weeks · Me: · Alright whenever you're ready", { name: 'Robert', mine: true, preview: "Alright whenever you're ready" }],
     ['A · Anastasia · 5 months · 3', { name: 'Anastasia', unread: 3, preview: '' }],
     ['mikelavery · 6 days · Me: Hi Mike', { name: 'mikelavery', mine: true, preview: 'Hi Mike' }],
@@ -21,7 +21,7 @@ describe('parseRowPieces (real rows from the log)', () => {
   });
 
   it('needs a time piece with a name before it', () => {
-    expect(parseRowPieces(['Miracle R', 'Hello'])).toBeNull();
+    expect(parseRowPieces(['Buyer One', 'Hello'])).toBeNull();
     expect(parseRowPieces(['Just now', 'Hello'])).toBeNull();
   });
 });
@@ -70,24 +70,24 @@ const OTHERS = ["M · mikelavery · 6 days · Me: · Hi Mike", "R · Robert · 4
 
 describe('watchInboxList', () => {
   it('replays the real hidden-tab log: three buyer messages give three alerts, nothing else does', async () => {
-    start(['M · Miracle R · 19 hours · Me: · Sure, sending it now', ...OTHERS]);
+    start(['M · Buyer One · 19 hours · Me: · Sure, sending it now', ...OTHERS]);
     expect(messages).toEqual([]); // rows present at load never alert
 
-    await setRow(0, 'M · Miracle R · 19 hours · Typing...'); // 16:30:42
-    await setRow(0, "M · Miracle R · Just now · Great what's the update · 1"); // 16:30:49
-    await setRow(0, "M · Miracle R · 1 minute · Great what's the update · 1"); // time tick
-    await setRow(0, "M · Miracle R · Just now · Here's some more info · 2"); // 16:33:52
-    await setRow(0, "M · Miracle R · 2 minutes · Here's some more info · 2");
-    await setRow(0, 'M · Miracle R · 3 minutes · Typing... · 2'); // 16:36:32
-    await setRow(0, 'M · Miracle R · Just now · Gotten it yet? · 3'); // 16:36:38
-    await setRow(0, 'M · Miracle R · Just now · Gotten it yet?'); // 16:37:24 read on the phone
-    await setRow(0, "M · Miracle R · Just now · Me: · Yep I've gotten it. Will update you soon"); // 16:37:37 my reply
-    await setRow(0, "M · Miracle R · 1 minute · Me: · Yep I've gotten it. Will update you soon");
+    await setRow(0, 'M · Buyer One · 19 hours · Typing...'); // 16:30:42
+    await setRow(0, "M · Buyer One · Just now · Good, any news · 1"); // 16:30:49
+    await setRow(0, "M · Buyer One · 1 minute · Good, any news · 1"); // time tick
+    await setRow(0, "M · Buyer One · Just now · Extra details attached · 2"); // 16:33:52
+    await setRow(0, "M · Buyer One · 2 minutes · Extra details attached · 2");
+    await setRow(0, 'M · Buyer One · 3 minutes · Typing... · 2'); // 16:36:32
+    await setRow(0, 'M · Buyer One · Just now · Did you receive it? · 3'); // 16:36:38
+    await setRow(0, 'M · Buyer One · Just now · Did you receive it?'); // 16:37:24 read on the phone
+    await setRow(0, "M · Buyer One · Just now · Me: · Sample text fourteen"); // 16:37:37 my reply
+    await setRow(0, "M · Buyer One · 1 minute · Me: · Sample text fourteen");
 
     expect(messages).toEqual([
-      { username: '', displayName: 'Miracle R', body: "Great what's the update", count: 1 },
-      { username: '', displayName: 'Miracle R', body: "Here's some more info", count: 1 },
-      { username: '', displayName: 'Miracle R', body: 'Gotten it yet?', count: 1 },
+      { username: '', displayName: 'Buyer One', body: "Good, any news", count: 1 },
+      { username: '', displayName: 'Buyer One', body: "Extra details attached", count: 1 },
+      { username: '', displayName: 'Buyer One', body: 'Did you receive it?', count: 1 },
     ]);
   });
 
@@ -123,7 +123,7 @@ describe('watchInboxList', () => {
   });
 
   it('does not alert when the whole list re-renders with new elements', async () => {
-    start(['M · Miracle R · 1 hour · Hi · 1', ...OTHERS]);
+    start(['M · Buyer One · 1 hour · Hi · 1', ...OTHERS]);
     const texts = Array.from(list.children).map((r) => Array.from(r.children).map((s) => s.textContent).join(' · '));
     list.replaceChildren(...texts.map(makeRow));
     await flush();

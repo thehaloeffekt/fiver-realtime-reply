@@ -1,4 +1,5 @@
 import { browser } from 'wxt/browser';
+import type { BuyerZone } from './buyerTime';
 import type { DiagEntry } from './diagnostics';
 import type { SavedListState } from './listState';
 import type { CaptureKind } from './selectors';
@@ -40,6 +41,12 @@ export interface LocalState {
    * was read by the text fallback, which has no username.
    */
   knownUsers: Record<string, string>;
+  /**
+   * Buyer username (lowercased) → UTC offset read from the conversation
+   * header, with the date it was read. Learned only from conversations that
+   * were open anyway; newest 500 kept.
+   */
+  buyerZones: Record<string, BuyerZone>;
   /** Background diagnostics (debug mode): the last 300 entries from Fiverr pages. */
   diagnostics: DiagEntry[];
 }
@@ -87,6 +94,7 @@ const LOCAL_DEFAULTS: LocalState = {
   pendingClaims: [],
   captures: {},
   knownUsers: {},
+  buyerZones: {},
   diagnostics: [],
 };
 

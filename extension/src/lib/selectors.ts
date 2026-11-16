@@ -96,6 +96,27 @@ export const CONVERSATION = {
   attachmentArea: '.attachments-list, .attachment',
 } as const;
 
+/**
+ * The conversation header (above the thread). Confirmed from a real capture
+ * (tests/fixtures/conversation.html): a <header> with the buyer's avatar
+ * (`data-track-value` = buyer username) and their local time as
+ * `<time data-track-tag="box">2:57 AM</time>` followed by
+ * `<span data-track-tag="typography">(local time)</span>`.
+ */
+export const CONVERSATION_HEADER = {
+  header: 'header',
+  avatar: '[data-track-tag="avatar"][data-track-value]',
+  clock: 'time',
+  clockLabel: '(local time)',
+  /**
+   * About panel: a label "From" and the country after it. NOT confirmed
+   * from a capture yet; read only when a typography element says exactly
+   * "From", otherwise ignored.
+   */
+  aboutLabel: '[data-track-tag="typography"]',
+  aboutFrom: 'From',
+} as const;
+
 /** Interface text that may sit inside a message but is not the buyer's words. */
 export const CONVERSATION_UI_TEXT = ['Translate to English', 'Create an offer'] as const;
 

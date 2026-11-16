@@ -183,15 +183,44 @@ logged-out page is not reloaded every minute, and never while you are looking
 at the watch tab or while a "Full message" read is moving it.
 
 **"Full message"** opens `/inbox/{username}` in the watch tab and reads the
-buyer's last 10 messages (`div.message`, keyed by its id), each with its time.
-Files are written as `[file: name]`; the file itself is never read or sent.
-Your own messages are skipped by your username (from the account menu) or the
-"Me" name. "Translate to English" and "Create an offer" are interface text and
-are never part of a body.
+buyer's last 10 messages (`div.message`, keyed by its id). Files are written as
+`[file: name]`; the file itself is never read or sent. Your own messages are
+skipped by your username (from the account menu) or the "Me" name. "Translate
+to English" and "Create an offer" are interface text and are never part of a
+body. The reply has **Open conversation** and **Check now** buttons.
+
+**Message times: my time and the buyer's time** (`src/lib/buyerTime.ts`). A
+conversation page shows three zones: message times are in the Fiverr
+account's zone, the header shows the buyer's local time, and the computer has
+its own. The extension does not parse the message time text. The second half of
+each message id (`{conversation}_{message}`) is a version-1 UUID, which holds
+the moment the message was created; shown in the account's zone it gives
+exactly the time the page shows (tested on the capture). That instant is shown
+in this computer's zone, and at the buyer's offset:
+`Nov 16, 10:53 AM (buyer 9:53 AM): text`, with the buyer's day added when it
+is a different day. If an id does not parse, the page's text is shown and
+marked `(Fiverr account time)`. The reply's first line is
+`Buyer local time now: 9:54 AM (UTC+0, Country)`.
+
+**The buyer's offset is learned passively.** The header shows
+`<time>2:57 AM</time><span>(local time)</span>` next to the buyer's avatar. In
+any Fiverr tab where a conversation is open (yours, or "Full message"), the
+content script compares that clock with the current UTC time, rounds to 15
+minutes, and saves the offset per buyer username with the date. The clock has
+no date, so the offset is only known modulo 24 h; it is put in −10:00…+13:45,
+which keeps Hawaii (−10) and reads −11/−12 as +13/+12 (New Zealand, Fiji,
+Tonga), so every result is in −12…+14. It is re-read on every page change,
+when the clock is current. An offset older than 30 days is still used but
+shown with `?` (daylight saving may have changed it). The country comes from an
+About panel row "From", when the page shows one (not yet confirmed from a
+capture). The extension never opens a conversation just to learn the zone,
+because opening it marks it read. Alerts get a last line `Buyer time: 9:54 AM`
+when the offset for that buyer is known.
 
 **"Check now" and `/check`** reload the watch tab, run the compare, and reply
 with the Unread chip's count (unread conversations) and each unread row with
-its display name, username and count.
+its display name, username and count, with **Open inbox** and **Check now**
+buttons for that account.
 
 **Default account label** is your username, read from the profile button in
 the page header (`data-track-value`, same as the img alt). The conversation
@@ -232,10 +261,35 @@ the saved label or the username read from Fiverr, and never the "Fiverr
 account" placeholder; with neither, it says to name the account in step 4.
 Saving a label sends "Account named …" to confirm it.
 
-**Multi-account replies.** `/check` and `/status` go to every profile, and each
-answers for itself. For `/status`, the online profile with the smallest
-accountId (from the relay's presence frames) also lists offline profiles, so
-they appear exactly once.
+**Telegram commands.** Registered with `setMyCommands` at setup (step 2) and
+after each extension update, so they show in Telegram's "/" menu.
+
+| Command | Who answers |
+| --- | --- |
+| `/check` | every account: unread count and unread buyers |
+| `/check {label}` | only that account |
+| `/full {username}` (with or without `@`) | each account that has that buyer in its inbox list |
+| `/full {username} {label}` | only that account, also when it does not have the buyer |
+| `/status` | each account: label, online, alerts on/paused, unread count, last alert; the leader adds offline accounts |
+| `/pause`, `/resume` | every account, replying with its new state |
+| `/pause {label}`, `/resume {label}` | only that account |
+| `/help` | the leader: commands and examples |
+
+The relay sends every command to every profile, and each one decides for
+itself. Labels match without case. A label is the saved account label, or the
+Fiverr username when none is saved (the same name the relay shows in
+presence). **The leader** is the online profile with the smallest accountId in
+the relay's presence list; it alone answers for the group: `/help`, an unknown
+label ("No account is named …" plus the valid labels), and a label whose
+account is offline. So each command gets one reply per account it is for, and
+group answers come once. If no account has the buyer in `/full {username}`,
+nobody answers (one profile cannot see another's inbox).
+
+**Paused.** The popup shows a "Paused" badge and banner. Switching alerts off
+or on in the popup or in Settings sends one Telegram message ("alerts paused in
+Chrome" / "alerts on"), so every device on the chat sees it. `/pause` and
+`/resume` reply instead. Messages that arrive while paused are not sent later:
+the list state keeps updating, so `/resume` does not replay them.
 
 ## Files
 
@@ -252,7 +306,10 @@ src/background/relay.ts     WebSocket client: auth, ping, ack, claims, backoff
 src/background/watchTab.ts  pinned tab, reload alarm, reads, job queue
 src/background/alerts.ts    toast / list message → Telegram
 src/background/listSync.ts  saved list state, compare after reloads, stale page check
-src/background/commands.ts  /start /check /status, buttons, offline notice
+src/background/commands.ts  commands (/check /full /status /pause /resume /help), buttons, leader rule, offline notice
+src/background/buyerZones.ts saved buyer UTC offsets per username
+src/lib/buyerTime.ts        message time from the id, buyer offset from the header clock, formatting
+src/content/buyerHeader.ts  reads the conversation header clock passively in any Fiverr tab
 src/content/observer.ts     toast MutationObservers, replay flag
 src/content/inboxWatcher.ts inbox list detector (works in hidden tabs)
 src/content/reader.ts       Unread chip, list rows, conversation, my username

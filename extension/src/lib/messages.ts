@@ -27,6 +27,23 @@ export interface ConversationMessage {
   files: string[];
 }
 
+/** The conversation header: the buyer's local time, as a UTC offset. */
+export interface BuyerHeader {
+  username: string;
+  /** Minutes east of UTC, computed when the header was read. */
+  offset: number;
+  /** The clock as shown, e.g. "2:57 AM". */
+  clock: string;
+  /** From the About panel, when shown. */
+  country?: string;
+}
+
+/** "Full message": the buyer's messages and the header, read together. */
+export interface ConversationRead {
+  messages: ConversationMessage[];
+  header: BuyerHeader | null;
+}
+
 /** Why a page asks to be reloaded. */
 export type StaleReason = 'resume' | 'no-list';
 
@@ -40,6 +57,8 @@ export interface ListStatus {
   page: string;
   /** The live watcher's state per conversation. */
   rows: Record<string, RowState>;
+  /** The Unread chip count now, or null when it is not on the page. */
+  unread: number | null;
 }
 
 /** Content script → background */
@@ -50,7 +69,8 @@ export type ContentToBackground =
   | { type: 'diag'; entries: DiagEntry[] }
   | { type: 'listMessage'; message: ListMessage }
   | { type: 'listState'; page: string; rows: Record<string, RowState> }
-  | { type: 'stale'; reason: StaleReason };
+  | { type: 'stale'; reason: StaleReason }
+  | { type: 'buyerHeader'; header: BuyerHeader };
 
 /** Background → content script */
 export type BackgroundToContent =
@@ -68,6 +88,7 @@ export type UiToBackground =
   | { type: 'setup:waitForStart' }
   | { type: 'alert:test' }
   | { type: 'check:now' }
+  | { type: 'alerts:set'; on: boolean }
   | { type: 'watch:ensure' }
   | { type: 'watch:reschedule' }
   | { type: 'profile:disconnect' }

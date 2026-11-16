@@ -1,9 +1,11 @@
 import { DEDUPE_WINDOW_MS, Deduper, REPLAY_WINDOW_MS, SenderGate, dedupeKey, senderId, senderKey, type AlertSource } from '../lib/dedupe';
+import { formatBuyerAt } from '../lib/buyerTime';
 import { formatAlert } from '../lib/format';
 import { INBOX_URL } from '../lib/constants';
 import type { ListMessage } from '../lib/inboxRow';
 import { getLocal, getSession, isConfigured, labelOf, setLocal, setSession, updateLocal, type RecentAlert } from '../lib/storage';
 import { describeBody, type Toast } from '../lib/toast';
+import { zoneFor } from './buyerZones';
 import { notify } from './notify';
 
 /** Keys are kept for REPLAY_WINDOW_MS so replayed toasts can be checked against them. */
@@ -92,7 +94,10 @@ async function handleIncoming(m: Incoming): Promise<void> {
     return;
   }
 
-  const { html, keyboard } = formatAlert(labelOf(s), m, body.text, s.accountId, m.more ?? 0);
+  // The buyer's local time now, only when their offset was learned before.
+  const zone = zoneFor(s, m.username);
+  const buyerTime = zone ? formatBuyerAt(now, zone, now) : undefined;
+  const { html, keyboard } = formatAlert(labelOf(s), m, body.text, s.accountId, m.more ?? 0, buyerTime);
   try {
     await notify(html, { keyboard, claim: true, retries: 3 });
     await setLocal({ lastAlertAt: now });

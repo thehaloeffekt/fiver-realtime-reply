@@ -5,7 +5,8 @@ import { watchInboxList } from '../content/inboxWatcher';
 import { watchToasts } from '../content/observer';
 import type { DiagEntry, DiagKind } from '../lib/diagnostics';
 import { startPicker } from '../content/picker';
-import { readConversation, readInbox, waitForLoggedInUsername } from '../content/reader';
+import { watchBuyerHeader } from '../content/buyerHeader';
+import { readConversation, readInbox, readUnreadChip, waitForLoggedInUsername } from '../content/reader';
 import type { RowState } from '../lib/listState';
 import type { BackgroundToContent, ContentToBackground, InboxSnapshot, ListStatus } from '../lib/messages';
 
@@ -62,6 +63,9 @@ export default defineContentScript({
     document.addEventListener('resume', onResume);
     ctx.onInvalidated(() => document.removeEventListener('resume', onResume));
 
+    // The buyer's local time in an open conversation's header → their UTC offset.
+    ctx.onInvalidated(watchBuyerHeader((header) => send({ type: 'buyerHeader', header })));
+
     // The profile button in the header has my username (default label).
     void waitForLoggedInUsername(20_000).then((username) => {
       if (username) send({ type: 'username', username });
@@ -104,7 +108,10 @@ export default defineContentScript({
           readConversation(msg.limit, msg.myUsername).then(sendResponse, (e) => sendResponse({ ok: false, error: String(e) }));
           return true;
         case 'listStatus':
-          sendResponse({ present: missingSince === null, missingSince, path: location.pathname, page, rows } satisfies ListStatus);
+          {
+            const chip = readUnreadChip();
+            sendResponse({ present: missingSince === null, missingSince, path: location.pathname, page, rows, unread: chip.ok ? chip.value : null } satisfies ListStatus);
+          }
           return;
         case 'startCapture':
           startPicker(msg.kind, async (html) => send({ type: 'capture', kind: msg.kind, html, url: location.href }));
