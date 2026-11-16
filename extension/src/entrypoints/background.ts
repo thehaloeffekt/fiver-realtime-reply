@@ -1,9 +1,9 @@
 import { browser, type Browser } from 'wxt/browser';
 import { defineBackground } from 'wxt/utils/define-background';
-import { handleListMessage, handleToast, sendTestAlert } from '../background/alerts';
+import { handleListMessage, handleThreadMessage, handleToast, sendTestAlert } from '../background/alerts';
 import { saveBuyerZone } from '../background/buyerZones';
 import { handleOffline, handleUpdate, labelSavedText, pauseText, registerCommands, setAlertsOn } from '../background/commands';
-import { onListState, onStale, reloadAndCompare, watchdog } from '../background/listSync';
+import { onListState, onStale, reloadAndCompare, restWatchTab, watchdog } from '../background/listSync';
 import { notify } from '../background/notify';
 import { connectRelay, relayHeartbeat, retryRelayNow, setRelayHandlers } from '../background/relay';
 import { connectAndRegisterWebhook, disconnectProfile, onLinked, waitForStart } from '../background/setup';
@@ -33,6 +33,12 @@ export default defineBackground({
     });
     browser.alarms.onAlarm.addListener((alarm) => void onAlarm(alarm));
     browser.tabs.onRemoved.addListener((tabId, info) => void onTabRemoved(tabId, info));
+    // The watch tab must rest on /inbox: re-check when it navigates or is hidden or shown.
+    browser.tabs.onActivated.addListener(() => void restWatchTab());
+    browser.tabs.onUpdated.addListener((tabId, info) => {
+      if (info.url) void getSession().then((s) => (s.watchTabId === tabId ? restWatchTab() : undefined));
+    });
+    browser.windows.onFocusChanged.addListener(() => void restWatchTab());
     browser.storage.onChanged.addListener(onStorageChanged);
     browser.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       handleMessage(msg, sender).then(
@@ -116,6 +122,8 @@ async function handleMessage(msg: ContentToBackground | UiToBackground, sender: 
         return handleToast(msg.toast);
       case 'listMessage':
         return handleListMessage(msg.message);
+      case 'threadMessage':
+        return handleThreadMessage(msg.message);
       case 'listState':
         return onListState(msg.rows, msg.page, sender.tab?.id);
       case 'stale':

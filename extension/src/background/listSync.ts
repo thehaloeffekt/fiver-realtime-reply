@@ -25,7 +25,7 @@
 import { browser } from 'wxt/browser';
 import { INBOX_URL } from '../lib/constants';
 import type { InboxSnapshot, ListStatus, StaleReason } from '../lib/messages';
-import { compareWithSaved, sanitizeRows, stateOf, usableSaved, type RowState } from '../lib/listState';
+import { READ_AT_ONCE_GAP_MS, compareWithSaved, sanitizeRows, stateOf, usableSaved, type RowState } from '../lib/listState';
 import { escapeHtml } from '../lib/telegram';
 import { getLocal, getSession, isConfigured, labelOf, setLocal, setSession, updateLocal } from '../lib/storage';
 import { handleListMessage } from './alerts';
@@ -91,7 +91,9 @@ export async function applyCompare(snap: InboxSnapshot): Promise<void> {
   const now = Date.now();
   const s = await getLocal();
   const saved = usableSaved(s.listState, now);
-  const gap = saved && saved.page !== snap.page ? compareWithSaved(saved.rows, fresh) : [];
+  // Read-at-once rows (0 unread, new buyer preview) only after a short gap:
+  // the state saved right before a reload or the return to /inbox.
+  const gap = saved && saved.page !== snap.page ? compareWithSaved(saved.rows, fresh, { readAtOnce: now - saved.at < READ_AT_ONCE_GAP_MS }) : [];
   await updateLocal('listState', () => ({ at: now, page: snap.page, rows: stateOf(fresh, saved?.rows) }));
 
   if (!gap.length || !s.settings.unreadCheck) return;
@@ -116,7 +118,9 @@ export async function reloadAndCompare(): Promise<InboxSnapshot> {
 // Step 2: before every reload, save what the page shows right now.
 setBeforeReload(async (tabId) => {
   const status = await askTabOnce<ListStatus>(tabId, { type: 'listStatus' }, 3000);
-  if (status?.rows && status.page) await save(status.page, sanitizeRows(status.rows) ?? {});
+  // A conversation page may have no list: never replace the saved state with an empty one.
+  const rows = sanitizeRows(status?.rows);
+  if (status?.page && rows && Object.keys(rows).length) await save(status.page, rows);
 });
 
 // A tab just became the watch tab. Reports it sent before that were ignored,
@@ -177,6 +181,8 @@ export async function watchdog(): Promise<void> {
   if (!tab || tab.status === 'loading') return;
   if (tab.discarded) return staleReload('discarded');
 
+  if (tab.url && /^\/inbox\/[^/]+/.test(new URL(tab.url).pathname)) return restWatchTab();
+
   const status = await askTabOnce<ListStatus>(watchTabId, { type: 'listStatus' }, 5000);
   if (watchTabBusy()) return; // a job started meanwhile
   if (!status) {
@@ -189,4 +195,64 @@ export async function watchdog(): Promise<void> {
   if (!status.present && status.missingSince != null && Date.now() - status.missingSince > MISSING_LIST_MS && !(await userIsOnTab(watchTabId))) {
     await staleReload('no list');
   }
+}
+
+// ------------------------------------------------- watch tab rests on /inbox
+
+/** The watch tab may stay on a conversation, hidden, this long. */
+export const OFF_INBOX_MS = 60_000;
+
+/**
+ * What to do with a watch tab that is on `path`. Pure, for tests.
+ * - "none": it is on /inbox (or another page the stale check handles), a
+ *   "Full message" read is moving it, or the user can see it.
+ * - "wait": on a conversation and hidden, for less than OFF_INBOX_MS so far.
+ * - "return": on a conversation and hidden for longer: go back to /inbox.
+ */
+export function restDecision(o: { path: string; busy: boolean; hidden: boolean; since: number | undefined; now: number }): { action: 'none' | 'wait' | 'return'; since?: number } {
+  if (!/^\/inbox\/[^/]+/.test(o.path) || o.busy || !o.hidden) return { action: 'none' };
+  const since = o.since ?? o.now;
+  return o.now - since >= OFF_INBOX_MS ? { action: 'return' } : { action: 'wait', since };
+}
+
+let restTimer: ReturnType<typeof setTimeout> | undefined;
+
+/**
+ * The watch tab must rest on /inbox with no conversation open. With a
+ * conversation open, Fiverr marks its messages read at once, and while the
+ * tab shows a conversation its list (if any) is not the one we track. So if
+ * it sits hidden on /inbox/{username} for over a minute (and no "Full
+ * message" is using it), go back to /inbox and run the list compare, which
+ * catches what arrived meanwhile. Called on tab and window changes, and each
+ * minute from the watchdog.
+ */
+export async function restWatchTab(): Promise<void> {
+  clearTimeout(restTimer);
+  const { watchTabId, watchOffInboxSince } = await getSession();
+  if (watchTabId == null || !isConfigured(await getLocal())) return;
+  const tab = await browser.tabs.get(watchTabId).catch(() => null);
+  if (!tab?.url) return;
+  const win = await browser.windows.get(tab.windowId).catch(() => null);
+  const now = Date.now();
+  const d = restDecision({
+    path: new URL(tab.url).pathname,
+    busy: watchTabBusy(),
+    hidden: !tab.active || win?.state === 'minimized',
+    since: watchOffInboxSince,
+    now,
+  });
+  if (d.action === 'none') {
+    if (watchOffInboxSince != null && !watchTabBusy()) await setSession({ watchOffInboxSince: undefined });
+    return;
+  }
+  if (d.action === 'wait') {
+    if (watchOffInboxSince == null) await setSession({ watchOffInboxSince: d.since });
+    // Look again when the minute is up (the watchdog is the backup if the worker sleeps).
+    restTimer = setTimeout(() => void restWatchTab(), d.since! + OFF_INBOX_MS - now + 500);
+    return;
+  }
+  await setSession({ watchOffInboxSince: undefined });
+  console.info('[watch] back to /inbox after a conversation was left open');
+  // Saves the list state, loads /inbox, compares: alerts for what came meanwhile.
+  await reloadAndCompare().catch((e) => console.warn('[watch] return to /inbox failed', e));
 }

@@ -140,6 +140,38 @@ username. If a row ever loses its attributes, it is read by the order of its
 text (anchored on the relative time) and the display name → username map
 learned from toasts fills in the username.
 
+**Third detector: the open conversation's thread** (`src/content/threadWatcher.ts`).
+With a conversation open in a tab, Fiverr marks each new message in it read at
+once, so its inbox row never becomes unread, and Fiverr draws no toast in a
+hidden tab. So nothing alerted until the tab came to the front and Fiverr
+replayed the toast. On `/inbox/{username}` the thread is watched instead: a new
+`div.message` whose id was not there when the conversation opened (the first
+1.5 s of rendering are the baseline), whose UUID time is newer than every
+message in that baseline and not more than 5 min before the conversation was
+opened (history loaded by scrolling up never counts), and whose sender is that
+buyer (not "Me", not my username) is a new message. Files are named as
+`[file: name]`, never sent. It alerts only while the tab is hidden or its
+window has no focus; in a visible, focused tab you are reading it. The
+background also skips it when any tab shows that conversation in a focused
+window. Keys: the message id (two tabs with the same conversation open give one
+alert) and the usual account + username + body, with the body as the toast
+shows it (the text, or "1 File" for a file-only message), so the replayed
+toast and the list do not alert again.
+
+**Rows read at once.** The same open conversation makes its inbox row change
+its preview while it stays at 0 unread. The list detector alerts on that too
+(as "read"), only while its own tab is hidden or unfocused, and the background
+drops it if the conversation is in view. In the after-reload compare it counts
+only when the saved state is under 5 minutes old (a reload or the return to
+/inbox saves it right before); after a long gap a read row is more likely a
+message you read on the phone.
+
+**The watch tab rests on `/inbox`.** If it shows a conversation, hidden, for
+over 60 s and no "Full message" is using it, it goes back to `/inbox` and the
+list compare runs. Checked on tab and window changes and every minute. The
+state saved before that navigation is never an empty list, so a conversation
+page without the list cannot wipe the saved state.
+
 **Dedupe: same account + username + body within 20 s.** The toast and the
 list report the same message, and several tabs show the same toast; they
 collapse into one alert. The key uses the first 40 letters of the body,
@@ -313,6 +345,8 @@ src/background/commands.ts  commands (/check /full /status /pause /resume /help)
 src/background/buyerZones.ts saved buyer UTC offsets per username
 src/lib/buyerTime.ts        message time from the id, buyer offset from the header clock, formatting
 src/content/buyerHeader.ts  reads the conversation header clock passively in any Fiverr tab
+src/content/threadWatcher.ts new buyer messages in an open conversation, while you are away from the tab
+src/background/view.ts      is a conversation in view (active tab, focused window)
 src/content/observer.ts     toast MutationObservers, replay flag
 src/content/inboxWatcher.ts inbox list detector (works in hidden tabs)
 src/content/reader.ts       Unread chip, list rows, conversation, my username

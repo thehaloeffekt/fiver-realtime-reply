@@ -92,7 +92,7 @@ export class Deduper {
   }
 }
 
-export type AlertSource = 'toast' | 'list';
+export type AlertSource = 'toast' | 'list' | 'thread';
 
 /**
  * For messages whose text the two detectors show differently. A file is

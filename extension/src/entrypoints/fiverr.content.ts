@@ -6,6 +6,7 @@ import { watchToasts } from '../content/observer';
 import type { DiagEntry, DiagKind } from '../lib/diagnostics';
 import { startPicker } from '../content/picker';
 import { watchBuyerHeader } from '../content/buyerHeader';
+import { watchThread } from '../content/threadWatcher';
 import { readConversation, readInbox, readUnreadChip, waitForLoggedInUsername } from '../content/reader';
 import type { RowState } from '../lib/listState';
 import type { BackgroundToContent, ContentToBackground, InboxSnapshot, ListStatus } from '../lib/messages';
@@ -67,9 +68,16 @@ export default defineContentScript({
     ctx.onInvalidated(watchBuyerHeader((header) => send({ type: 'buyerHeader', header })));
 
     // The profile button in the header has my username (default label).
+    let myUsername: string | null = null;
     void waitForLoggedInUsername(20_000).then((username) => {
+      myUsername = username;
       if (username) send({ type: 'username', username });
     });
+
+    // Third detector: a new buyer message in an open conversation, while the
+    // user is away from this tab (Fiverr marks it read at once, so the list
+    // row never turns unread, and draws no toast in a hidden tab).
+    ctx.onInvalidated(watchThread((message) => send({ type: 'threadMessage', message }), { myUsername: () => myUsername }));
 
     // Background diagnostics: runs only while Settings → Debug mode is on,
     // and starts or stops in open tabs when the setting changes.

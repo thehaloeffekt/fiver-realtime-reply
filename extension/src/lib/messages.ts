@@ -44,6 +44,18 @@ export interface ConversationRead {
   header: BuyerHeader | null;
 }
 
+/** A new buyer message seen in an open conversation's thread. */
+export interface ThreadMessage {
+  username: string;
+  displayName: string;
+  /** Fiverr's message id (the div.message id), unique per message. */
+  id: string;
+  /** From the id's time-based UUID. */
+  sentAt: number;
+  text: string;
+  files: string[];
+}
+
 /** Why a page asks to be reloaded. */
 export type StaleReason = 'resume' | 'no-list';
 
@@ -70,7 +82,8 @@ export type ContentToBackground =
   | { type: 'listMessage'; message: ListMessage }
   | { type: 'listState'; page: string; rows: Record<string, RowState> }
   | { type: 'stale'; reason: StaleReason }
-  | { type: 'buyerHeader'; header: BuyerHeader };
+  | { type: 'buyerHeader'; header: BuyerHeader }
+  | { type: 'threadMessage'; message: ThreadMessage };
 
 /** Background → content script */
 export type BackgroundToContent =

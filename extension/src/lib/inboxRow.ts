@@ -29,6 +29,12 @@ export interface ListMessage {
   body: string;
   /** How many new messages this change stands for (unread count delta, at least 1). */
   count: number;
+  /**
+   * The row changed to a buyer message but shows 0 unread: Fiverr marked it
+   * read at once because the conversation is open in some tab. The
+   * background alerts only if nobody is looking at that conversation.
+   */
+  read?: boolean;
 }
 
 export interface InboxRow {
