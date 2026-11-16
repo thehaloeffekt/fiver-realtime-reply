@@ -1,31 +1,100 @@
 /**
- * Telegram updates that reach this profile through the relay: /start, /check,
- * /status, button presses, and the relay's "offline" notices.
+ * Telegram updates that reach this profile through the relay: the commands
+ * in BOT_COMMANDS, button presses, and the relay's "offline" notices.
+ *
+ * The relay sends every command to every connected profile (routed:false).
+ * Each profile decides for itself whether to answer: a command with a label
+ * is for the profile with that label; a command without one is for all of
+ * them. Replies about the group (an unknown label, an offline account, /help)
+ * come from one profile only, the leader (see isLeader), so the user gets
+ * one answer.
  */
-import { decodeCallback, isCallbackForMe } from '../lib/callback';
+import { buyerNowLine, formatBuyerAt, formatMine, messageSentAt, type BuyerZone } from '../lib/buyerTime';
+import { decodeCallback, encodeCallback, isCallbackForMe } from '../lib/callback';
 import { INBOX_URL, inboxUrlFor } from '../lib/constants';
 import { formatTime, truncate } from '../lib/format';
-import type { ConversationMessage, InboxSnapshot } from '../lib/messages';
-import { getLocal, getSession, knownLabel, labelOf, setLocal, type LocalState } from '../lib/storage';
-import { escapeHtml } from '../lib/telegram';
+import type { ConversationMessage, InboxSnapshot, ListStatus } from '../lib/messages';
+import { getLocal, getSession, knownLabel, labelOf, patchSettings, setLocal, type LocalState, type PresenceAccount } from '../lib/storage';
+import { escapeHtml, setMyCommands, type BotCommand, type InlineKeyboard } from '../lib/telegram';
+import { saveBuyerZone, zoneFor } from './buyerZones';
 import { answerCallback, notify, sendTo } from './notify';
 import { isRelayOpen } from './relay';
 import { reloadAndCompare } from './listSync';
-import { readConversation } from './watchTab';
+import { askTabOnce, readConversation } from './watchTab';
 
 type Json = Record<string, any>;
 
 const USERNAME = /^[A-Za-z0-9_.-]{1,64}$/;
 
+/** Shown in Telegram's "/" menu. Set at setup and after each extension update. */
+export const BOT_COMMANDS: BotCommand[] = [
+  { command: 'check', description: 'Check all accounts now. /check label: one account' },
+  { command: 'full', description: 'Last messages from a buyer: /full username [label]' },
+  { command: 'status', description: 'Label, online state, unread count, last alert' },
+  { command: 'pause', description: 'Pause alerts. /pause label: one account' },
+  { command: 'resume', description: 'Resume alerts. /resume label: one account' },
+  { command: 'help', description: 'Commands and examples' },
+];
+
+/** Registers BOT_COMMANDS with Telegram. Errors are ignored: the commands work without the menu. */
+export async function registerCommands(): Promise<void> {
+  const { token } = await getLocal();
+  if (token) await setMyCommands(token, BOT_COMMANDS).catch((e) => console.warn('[commands] setMyCommands failed', e));
+}
+
 /** "/check@MyBot arg" → "check" */
 export function commandOf(text: unknown): string | null {
+  return parseCommand(text)?.command ?? null;
+}
+
+/** "/full@MyBot  @Buyer_1  Main account" → { command: "full", args: "@Buyer_1  Main account" } */
+export function parseCommand(text: unknown): { command: string; args: string } | null {
   if (typeof text !== 'string' || !text.startsWith('/')) return null;
-  return text.slice(1).split(/[\s@]/)[0]!.toLowerCase();
+  const m = /^\/([^\s@]*)(?:@\S*)?\s*([\s\S]*)$/.exec(text);
+  if (!m) return null;
+  return { command: m[1]!.toLowerCase(), args: m[2]!.trim() };
+}
+
+/** Labels match without case and with spaces collapsed. */
+export const sameLabel = (a: string | null | undefined, b: string | null | undefined) =>
+  Boolean(a && b) && a!.replace(/\s+/g, ' ').trim().toLowerCase() === b!.replace(/\s+/g, ' ').trim().toLowerCase();
+
+/** The placeholder label of an account that has no name yet; never matched. */
+const PLACEHOLDER = 'Fiverr account';
+
+/**
+ * Who a command with `label` is for, as this profile sees it.
+ * - all: no label. Every profile answers for itself.
+ * - me: my label.
+ * - other: another account's label (from the relay's presence list).
+ * - unknown: no account has that label.
+ */
+export type Target = { kind: 'all' } | { kind: 'me' } | { kind: 'other'; account: PresenceAccount } | { kind: 'unknown' };
+
+export function resolveTarget(myLabel: string | null, myId: string, presence: PresenceAccount[], label: string): Target {
+  if (!label) return { kind: 'all' };
+  if (sameLabel(myLabel, label)) return { kind: 'me' };
+  const other = presence.find((a) => a.accountId !== myId && a.label !== PLACEHOLDER && sameLabel(a.label, label));
+  return other ? { kind: 'other', account: other } : { kind: 'unknown' };
+}
+
+/** Every label that a command can use: mine and the other accounts' (from presence). */
+export function validLabels(myLabel: string | null, myId: string, presence: PresenceAccount[]): string[] {
+  const out: string[] = [];
+  for (const l of [myLabel, ...presence.filter((a) => a.accountId !== myId).map((a) => a.label)]) {
+    if (l && l !== PLACEHOLDER && !out.some((x) => sameLabel(x, l))) out.push(l);
+  }
+  return out;
+}
+
+export function unknownLabelText(label: string, labels: string[]): string {
+  const list = labels.length ? labels.map((l) => `<code>${escapeHtml(l)}</code>`).join(', ') : 'none yet (name each account in its setup page)';
+  return `No account is named <b>${escapeHtml(label)}</b>. Valid labels: ${list}. Labels match without case.`;
 }
 
 /**
- * One profile speaks for the group (offline accounts in /status): the online
- * account with the smallest accountId, from the relay's presence frames.
+ * One profile speaks for the group: the online account with the smallest
+ * accountId, from the relay's presence frames.
  */
 async function isLeader(myId: string): Promise<boolean> {
   const { presence } = await getSession();
@@ -46,7 +115,8 @@ export async function handleUpdate(update: Json, routed: boolean): Promise<void>
 async function onMessage(message: Json, routed: boolean) {
   const s = await getLocal();
   const chat = message.chat ?? {};
-  const command = commandOf(message.text);
+  const parsed = parseCommand(message.text);
+  const command = parsed?.command ?? null;
 
   // Step 3 of setup. The relay sends /start to every profile on this bot.
   // Each one that has no chat yet saves it; only the profile whose options
@@ -62,32 +132,119 @@ async function onMessage(message: Json, routed: boolean) {
     return;
   }
   // From now on, only the linked chat counts.
-  if (chat.id !== s.chatId) return;
+  if (chat.id !== s.chatId || !s.accountId) return;
 
-  switch (command) {
-    case 'start':
-      if (s.linkWaitUntil && s.linkWaitUntil > Date.now()) {
-        await setLocal({ linkWaitUntil: undefined });
-        await notify(linkedText(s));
-      }
-      return;
-    case 'check':
-      return replyCheck(s);
-    case 'status':
-      return replyStatus(s);
-    case 'help':
-      if (await isLeader(s.accountId!)) await notify(HELP);
-      return;
-    case null:
-      // A plain reply to one of our alerts (routed:true). Never sent to Fiverr.
-      if (routed) {
-        await notify('Replies are not sent to Fiverr. Open the inbox to answer the buyer.', {
-          replyTo: message.message_id,
-          keyboard: [[{ text: 'Open inbox', url: INBOX_URL }]],
-        });
-      }
-      return;
+  if (command === 'start') {
+    if (s.linkWaitUntil && s.linkWaitUntil > Date.now()) {
+      await setLocal({ linkWaitUntil: undefined });
+      await notify(linkedText(s));
+    }
+    return;
   }
+  if (command === null) {
+    // A plain reply to one of our alerts (routed:true). Never sent to Fiverr.
+    if (routed) {
+      await notify('Replies are not sent to Fiverr. Open the inbox to answer the buyer.', {
+        replyTo: message.message_id,
+        keyboard: [[{ text: 'Open inbox', url: INBOX_URL }]],
+      });
+    }
+    return;
+  }
+  return runCommand(s, command, parsed!.args, message.message_id);
+}
+
+async function runCommand(s: LocalState, command: string, args: string, replyTo?: number) {
+  const myId = s.accountId!;
+  const { presence } = await getSession();
+  const myLabel = knownLabel(s);
+
+  // /full takes the buyer first, then the label.
+  let label = args;
+  let buyer = '';
+  if (command === 'full') {
+    const [first = '', ...rest] = args.split(/\s+/);
+    buyer = first.replace(/^@/, '');
+    label = rest.join(' ');
+  }
+  const target = resolveTarget(myLabel, myId, presence, label);
+
+  // Group answers: from the leader only.
+  if (target.kind === 'unknown' || target.kind === 'other' || command === 'help' || !KNOWN.has(command)) {
+    if (!(await isLeader(myId))) return;
+    if (command === 'help' || !KNOWN.has(command)) return void (await notify(helpText(validLabels(myLabel, myId, presence))));
+    if (target.kind === 'unknown') return void (await notify(unknownLabelText(label, validLabels(myLabel, myId, presence)), { replyTo }));
+    if (target.kind === 'other' && !target.account.online) {
+      await notify(`<b>${escapeHtml(target.account.label)}</b> is offline (last seen ${escapeHtml(formatTime(target.account.lastSeen))}). Open Chrome on that profile.`, { replyTo });
+    }
+    return;
+  }
+
+  // From here the command is for me (target "me" or "all").
+  switch (command) {
+    case 'check':
+      return replyCheck(s, replyTo);
+    case 'status':
+      return replyStatus(s, target.kind === 'all');
+    case 'pause':
+    case 'resume': {
+      const on = command === 'resume';
+      await setAlertsOn(on);
+      return void (await notify(pauseText(labelOf(s), on, 'command'), { replyTo }));
+    }
+    case 'full': {
+      if (!USERNAME.test(buyer)) {
+        // A bad username: one usage reply, from the leader (or from the named account).
+        if (target.kind === 'me' || (await isLeader(myId))) await notify(FULL_USAGE, { replyTo });
+        return;
+      }
+      if (hasBuyer(s, buyer)) return replyFull(s, buyer, replyTo);
+      // Not in my inbox list: silent, unless the command named this account.
+      if (target.kind === 'me') {
+        await notify(`<b>${escapeHtml(labelOf(s))}</b>: <b>@${escapeHtml(buyer)}</b> is not in this account's inbox list.`, { replyTo });
+      }
+      return;
+    }
+  }
+}
+
+const KNOWN = new Set(['check', 'status', 'pause', 'resume', 'full', 'help']);
+const FULL_USAGE = 'Usage: <code>/full username</code> or <code>/full username label</code>, for example <code>/full @some_buyer</code>.';
+
+/** The buyer has a row in this account's saved inbox list. */
+export function hasBuyer(s: Pick<LocalState, 'listState'>, username: string): boolean {
+  return Boolean(s.listState?.rows?.[`u:${username.toLowerCase()}`]);
+}
+
+export function helpText(labels: string[]): string {
+  const ex = labels[0] ?? 'Main';
+  return [
+    '<b>Fiverr Telegram Alerts</b>',
+    '/check: check all accounts now',
+    `/check ${escapeHtml(ex)}: only the account named ${escapeHtml(ex)}`,
+    '/full some_buyer: the last messages from that buyer (each account that has the buyer answers)',
+    `/full @some_buyer ${escapeHtml(ex)}: from that buyer on ${escapeHtml(ex)} only`,
+    '/status: label, online state, unread count and last alert of each account',
+    `/pause, /resume: stop or start alerts on all accounts; /pause ${escapeHtml(ex)}: one account`,
+    '/help: this list',
+    labels.length ? `Accounts: ${labels.map((l) => `<code>${escapeHtml(l)}</code>`).join(', ')}. Labels match without case.` : 'Labels match without case.',
+    'Buttons under an alert work only while the relay is online.',
+  ].join('\n');
+}
+
+/** Turns alerts on or off. Returns true when the setting changed. */
+export async function setAlertsOn(on: boolean): Promise<boolean> {
+  const { settings } = await getLocal();
+  if (settings.sendAlerts === on) return false;
+  await patchSettings({ sendAlerts: on });
+  return true;
+}
+
+/** The reply to /pause and /resume, and the notice for the popup switch. */
+export function pauseText(label: string, on: boolean, source: 'command' | 'chrome'): string {
+  const name = `<b>${escapeHtml(label)}</b>`;
+  if (on) return `${name}: alerts on${source === 'chrome' ? ' (turned on in Chrome)' : ''}.`;
+  return `${name}: alerts paused${source === 'chrome' ? ' in Chrome' : ''}. Messages that arrive while paused are not sent later. Send /resume to turn alerts back on.`;
 }
 
 /**
@@ -107,13 +264,6 @@ export function linkedText(s: LocalState): string {
 export function labelSavedText(label: string): string {
   return `Account named <b>${escapeHtml(label)}</b>. Alerts from this Chrome profile start with this name.`;
 }
-
-const HELP = [
-  '<b>Fiverr Telegram Alerts</b>',
-  '/check: unread messages on every account',
-  '/status: which accounts are online',
-  'Buttons under an alert work only while the relay is online.',
-].join('\n');
 
 async function onCallback(cq: Json, routed: boolean) {
   const s = await getLocal();
@@ -173,6 +323,12 @@ export function formatCheck(label: string, snap: InboxSnapshot): string {
   return lines.join('\n');
 }
 
+/** "Check now" for this account, next to an open link. */
+export function checkKeyboard(accountId: string, open: { text: string; url: string }): InlineKeyboard {
+  const check = encodeCallback(accountId, 'check', '');
+  return [[open, ...(check ? [{ text: 'Check now', callback_data: check }] : [])]];
+}
+
 async function replyCheck(s: LocalState, replyTo?: number) {
   const label = labelOf(s);
   let html: string;
@@ -184,45 +340,86 @@ async function replyCheck(s: LocalState, replyTo?: number) {
   } catch (err) {
     html = `<b>${escapeHtml(label)}</b>: check failed. ${escapeHtml(String((err as Error).message ?? err))}`;
   }
-  await notify(html, { replyTo, keyboard: [[{ text: 'Open inbox', url: INBOX_URL }]] });
+  await notify(html, { replyTo, keyboard: checkKeyboard(s.accountId!, { text: 'Open inbox', url: INBOX_URL }) });
 }
 
-/** One line per message: "Nov 15, 9:49 PM: text [file: name]". Files are named, never sent. */
-export function formatConversation(messages: ConversationMessage[]): string {
+/**
+ * One line per message, oldest first:
+ * "<i>Nov 16, 10:53 AM (buyer 9:53 AM)</i>: text [file: name]".
+ *
+ * My time comes from the message id (a time-based UUID), shown in this
+ * computer's zone. The buyer's time is the same moment at the buyer's
+ * offset, with their day when it differs from mine, and "?" when the offset
+ * is over 30 days old. If the id gives no time, the page's text is shown and
+ * marked as the Fiverr account's zone. Files are named, never sent.
+ */
+export function formatConversation(messages: ConversationMessage[], zone: BuyerZone | null = null, now = Date.now(), timeZone?: string): string {
   if (!messages.length) return 'No messages from the buyer found.';
   return messages
     .map((m) => {
       const parts = [m.text ? escapeHtml(truncate(m.text, 600)) : '', ...m.files.map((f) => `[file: ${escapeHtml(truncate(f, 120))}]`)].filter(Boolean);
-      const when = m.time ? `<i>${escapeHtml(m.time)}</i>: ` : '';
-      return `${when}${parts.join(' ') || '(no text)'}`;
+      const sentAt = messageSentAt(m.id);
+      let when = '';
+      if (sentAt !== null) when = formatMine(sentAt, timeZone) + (zone ? ` (buyer ${formatBuyerAt(sentAt, zone, now, timeZone)})` : '');
+      else if (m.time) when = `${m.time} (Fiverr account time)`;
+      return `${when ? `<i>${escapeHtml(when)}</i>: ` : ''}${parts.join(' ') || '(no text)'}`;
     })
     .join('\n');
 }
 
+/** The whole "Full message" reply, kept under Telegram's 4096 limit by dropping the oldest lines. */
+export function fullReplyText(label: string, username: string, body: string, zone: BuyerZone | null, now = Date.now(), timeZone?: string): string {
+  const top = [`<b>${escapeHtml(label)}</b>: last messages from <b>@${escapeHtml(username)}</b>`];
+  if (zone) top.push(escapeHtml(buyerNowLine(zone, now, timeZone)));
+  const header = top.join('\n');
+  const footer = '\n\n<i>Opening the conversation marked it as read on Fiverr.</i>';
+  // Drop whole lines, so an HTML tag is never cut.
+  const lines = body.split('\n');
+  while (lines.length > 1 && header.length + footer.length + lines.join('\n').length + 1 > 4000) lines.shift();
+  return `${header}\n${lines.join('\n')}${footer}`;
+}
+
 async function replyFull(s: LocalState, username: string, replyTo?: number) {
-  const label = labelOf(s);
-  const header = `<b>${escapeHtml(label)}</b>: last messages from <b>@${escapeHtml(username)}</b>`;
   let body: string;
+  let zone: BuyerZone | null = null;
   try {
     const res = await readConversation(username, 10);
-    body = res.ok ? formatConversation(res.value) : missingNote('The conversation', 'is', res.missing, res.error);
+    if (res.ok) {
+      // The header was just read: save the buyer's offset, then use the saved
+      // entry (it keeps a country seen earlier).
+      await saveBuyerZone(res.value.header);
+      zone = zoneFor(await getLocal(), username);
+      body = formatConversation(res.value.messages, zone);
+    } else {
+      body = missingNote('The conversation', 'is', res.missing, res.error);
+    }
   } catch (err) {
     body = `Could not read the conversation. ${escapeHtml(String((err as Error).message ?? err))}`;
   }
-  const footer = '\n\n<i>Opening the conversation marked it as read on Fiverr.</i>';
-  // Keep under Telegram's 4096 limit without cutting an HTML tag: drop the
-  // oldest lines first.
-  const lines = body.split('\n');
-  while (lines.length > 1 && header.length + footer.length + lines.join('\n').length + 1 > 4000) lines.shift();
-  const html = `${header}\n${lines.join('\n')}${footer}`;
-  await notify(html, { replyTo, keyboard: [[{ text: 'Open conversation', url: inboxUrlFor(username) }]] });
+  const html = fullReplyText(labelOf(s), username, body, zone);
+  await notify(html, { replyTo, keyboard: checkKeyboard(s.accountId!, { text: 'Open conversation', url: inboxUrlFor(username) }) });
 }
 
-async function replyStatus(s: LocalState) {
-  const lines = [
-    `<b>${escapeHtml(labelOf(s))}</b>: online, alerts ${s.settings.sendAlerts ? 'on' : 'paused'}, last alert ${escapeHtml(formatTime(s.lastAlertAt))}`,
-  ];
-  if (await isLeader(s.accountId!)) {
+/** The Unread chip count now (asks the watch tab), or the one from the last reload. */
+async function unreadNow(s: LocalState): Promise<{ n: number | null; live: boolean }> {
+  const { watchTabId } = await getSession();
+  if (watchTabId != null) {
+    const status = await askTabOnce<ListStatus>(watchTabId, { type: 'listStatus' }, 2000);
+    if (typeof status?.unread === 'number') return { n: status.unread, live: true };
+  }
+  return { n: s.lastUnread ?? null, live: false };
+}
+
+/** "<b>Main</b>: online, alerts on, 2 unread, last alert 10:04" */
+export function statusLine(label: string, alertsOn: boolean, unread: { n: number | null; live: boolean }, lastAlertAt: number | undefined, now = Date.now()): string {
+  const u = unread.n === null ? 'unread count unknown' : `${unread.n} unread${unread.live ? '' : ' (at the last reload)'}`;
+  return `<b>${escapeHtml(label)}</b>: online, alerts ${alertsOn ? 'on' : 'paused'}, ${u}, last alert ${escapeHtml(formatTime(lastAlertAt, now))}`;
+}
+
+async function replyStatus(s: LocalState, includeOthers: boolean) {
+  const lines = [statusLine(labelOf(s), s.settings.sendAlerts, await unreadNow(s), s.lastAlertAt)];
+  // Offline accounts cannot answer: the leader lists them.
+  if (includeOthers && (await isLeader(s.accountId!))) {
     const { presence } = await getSession();
     for (const a of presence.filter((a) => !a.online && a.accountId !== s.accountId)) {
       lines.push(`<b>${escapeHtml(a.label || a.accountId)}</b>: offline since ${escapeHtml(formatTime(a.lastSeen))}`);

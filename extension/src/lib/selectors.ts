@@ -96,6 +96,33 @@ export const CONVERSATION = {
   attachmentArea: '.attachments-list, .attachment',
 } as const;
 
+/**
+ * The conversation header (above the thread). Confirmed from a real capture
+ * (tests/fixtures/conversation.html): a <header> with the buyer's avatar
+ * (`data-track-value` = buyer username) and their local time as
+ * `<time data-track-tag="box">2:57 AM</time>` followed by
+ * `<span data-track-tag="typography">(local time)</span>`.
+ */
+export const CONVERSATION_HEADER = {
+  header: 'header',
+  avatar: '[data-track-tag="avatar"][data-track-value]',
+  clock: 'time',
+  clockLabel: '(local time)',
+  /**
+   * The details pane on the right ("Overview" → "About"). Confirmed from a
+   * real capture (tests/fixtures/details-pane.html): each fact is an
+   * `li[data-track-tag="list_item"]` with the label in a
+   * `p[data-track-tag="text"]` ("From") and the value in a
+   * `p[data-track-tag="typography"]` ("United Kingdom"). The pane is missing
+   * when the user closed the sidebar.
+   */
+  detailsPane: '[data-testid="details-pane"]',
+  detailsItem: 'li[data-track-tag="list_item"]',
+  detailsLabel: 'p[data-track-tag="text"]',
+  detailsValue: 'p[data-track-tag="typography"]',
+  fromLabel: 'From',
+} as const;
+
 /** Interface text that may sit inside a message but is not the buyer's words. */
 export const CONVERSATION_UI_TEXT = ['Translate to English', 'Create an offer'] as const;
 

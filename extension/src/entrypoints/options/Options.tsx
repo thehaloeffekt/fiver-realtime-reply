@@ -348,7 +348,12 @@ function SettingsTab({ local, session }: { local: LocalState; session: SessionSt
               <div className="strong">{title}</div>
               <div className="small muted">{help}</div>
             </div>
-            <Switch label={title} checked={Boolean(s[key])} onChange={(v) => void patchSettings({ [key]: v })} />
+            <Switch
+              label={title}
+              checked={Boolean(s[key])}
+              // Pause/resume goes through the background, which tells Telegram.
+              onChange={(v) => void (key === 'sendAlerts' ? ask({ type: 'alerts:set', on: v }) : patchSettings({ [key]: v }))}
+            />
           </div>
         ))}
       </section>
@@ -360,7 +365,7 @@ function SettingsTab({ local, session }: { local: LocalState; session: SessionSt
         <div className="tg">
           <div className="tg-bubble">
             <b>{labelOf(local)}</b>
-            {'\n'}Message from <b>Miracle R</b> (@m_rohn){'\n'}Later today
+            {'\n'}Message from <b>Example Buyer</b> (@example_buyer){'\n'}Later today
           </div>
           <div className="tg-buttons">
             <div className="tg-btn wide">Open inbox ↗</div>

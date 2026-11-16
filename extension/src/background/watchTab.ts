@@ -7,7 +7,7 @@
  */
 import { browser, type Browser } from 'wxt/browser';
 import { FIVERR_ORIGIN, INBOX_URL, inboxUrlFor } from '../lib/constants';
-import type { BackgroundToContent, ConversationMessage, InboxSnapshot, ReadResult } from '../lib/messages';
+import type { BackgroundToContent, ConversationRead, InboxSnapshot, ReadResult } from '../lib/messages';
 import { getLocal, getSession, isConfigured, removeSession, setSession } from '../lib/storage';
 
 export const RELOAD_ALARM = 'watch-reload';
@@ -204,12 +204,12 @@ export async function reloadAndRead(): Promise<InboxSnapshot> {
  * "Full message": open the conversation in the watch tab, read the buyer's
  * last messages, then go back to /inbox. Opening it marks it read on Fiverr.
  */
-export async function readConversation(username: string, limit = 10): Promise<ReadResult<ConversationMessage[]>> {
+export async function readConversation(username: string, limit = 10): Promise<ReadResult<ConversationRead>> {
   const { detectedUsername } = await getLocal();
   return withWatchTab(async (tabId) => {
     await navigate(tabId, inboxUrlFor(username), false);
     try {
-      return await askTab<ReadResult<ConversationMessage[]>>(tabId, { type: 'readConversation', limit, myUsername: detectedUsername });
+      return await askTab<ReadResult<ConversationRead>>(tabId, { type: 'readConversation', limit, myUsername: detectedUsername });
     } finally {
       await navigate(tabId, INBOX_URL, false).catch(() => undefined);
     }

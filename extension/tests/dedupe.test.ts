@@ -93,7 +93,7 @@ describe('RecentIds (update_id replay guard)', () => {
 describe('key: account + sender + body (toast and inbox list must agree)', () => {
   it('ignores case and spacing in the sender, and spacing in the body', () => {
     // Toast: direct text nodes joined without separators. List: pieces joined with spaces.
-    expect(dedupeKey('acc', 'Miracle R', "Great what's the update")).toBe(dedupeKey('acc', ' miracle  r ', "Great what's  the  update"));
+    expect(dedupeKey('acc', 'Buyer One', "Good, any news")).toBe(dedupeKey('acc', ' buyer  one ', 'good,  any  news'));
   });
 
   it('matches a long message to a cut list preview', () => {
@@ -110,7 +110,7 @@ describe('key: account + sender + body (toast and inbox list must agree)', () =>
 });
 
 describe('replayed toasts (longer window)', () => {
-  const k = dedupeKey('acc', 'Miracle R', 'Gotten it yet?');
+  const k = dedupeKey('acc', 'Buyer One', 'Did you receive it?');
 
   it('drops a replay of a message the list already alerted 8 minutes ago', () => {
     const d = new Deduper(DEDUPE_WINDOW_MS, REPLAY_WINDOW_MS);

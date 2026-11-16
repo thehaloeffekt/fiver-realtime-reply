@@ -1,7 +1,8 @@
 import { browser, type Browser } from 'wxt/browser';
 import { defineBackground } from 'wxt/utils/define-background';
 import { handleListMessage, handleToast, sendTestAlert } from '../background/alerts';
-import { handleOffline, handleUpdate, labelSavedText } from '../background/commands';
+import { saveBuyerZone } from '../background/buyerZones';
+import { handleOffline, handleUpdate, labelSavedText, pauseText, registerCommands, setAlertsOn } from '../background/commands';
 import { onListState, onStale, reloadAndCompare, watchdog } from '../background/listSync';
 import { notify } from '../background/notify';
 import { connectRelay, relayHeartbeat, retryRelayNow, setRelayHandlers } from '../background/relay';
@@ -11,7 +12,7 @@ import { FIVERR_ORIGIN } from '../lib/constants';
 import { appendDiag, sanitizeEntries, type DiagEntry } from '../lib/diagnostics';
 import { newAccountId } from '../lib/keys';
 import type { ContentToBackground, UiToBackground } from '../lib/messages';
-import { getLocal, getSession, isConfigured, setLocal, updateLocal } from '../lib/storage';
+import { getLocal, getSession, isConfigured, labelOf, setLocal, updateLocal } from '../lib/storage';
 
 const RELAY_ALARM = 'relay-check';
 
@@ -25,7 +26,11 @@ export default defineBackground({
 
     // Listeners are registered synchronously so Chrome can wake the worker for them.
     browser.runtime.onStartup.addListener(() => void boot());
-    browser.runtime.onInstalled.addListener(() => void boot());
+    browser.runtime.onInstalled.addListener((details) => {
+      void boot();
+      // A new version may have new commands: refresh Telegram's "/" menu.
+      if (details.reason === 'update') void registerCommands();
+    });
     browser.alarms.onAlarm.addListener((alarm) => void onAlarm(alarm));
     browser.tabs.onRemoved.addListener((tabId, info) => void onTabRemoved(tabId, info));
     browser.storage.onChanged.addListener(onStorageChanged);
@@ -115,6 +120,8 @@ async function handleMessage(msg: ContentToBackground | UiToBackground, sender: 
         return onListState(msg.rows, msg.page, sender.tab?.id);
       case 'stale':
         return onStale(msg.reason === 'resume' ? 'resume' : 'no-list', sender.tab?.id);
+      case 'buyerHeader':
+        return saveBuyerZone(msg.header);
       case 'username':
         // Every Fiverr page sends it; write only a change (it restarts the relay connection).
         if (/^[A-Za-z0-9_.-]{1,64}$/.test(msg.username) && (await getLocal()).detectedUsername !== msg.username) {
@@ -145,6 +152,16 @@ async function handleMessage(msg: ContentToBackground | UiToBackground, sender: 
     case 'check:now': {
       const snapshot = await reloadAndCompare();
       return { snapshot };
+    }
+    case 'alerts:set': {
+      // The popup or settings switch. One Telegram message per change, so
+      // every device with the chat sees that this account was paused.
+      const on = msg.on === true;
+      if (await setAlertsOn(on)) {
+        const s = await getLocal();
+        if (isConfigured(s)) await notify(pauseText(labelOf(s), on, 'chrome')).catch(() => undefined);
+      }
+      return;
     }
     case 'watch:ensure': {
       const tabId = await ensureWatchTab();

@@ -3,9 +3,10 @@
  * username. Read-only: nothing here clicks, types or submits.
  * Selectors are in selectors.ts, each checked against a real capture.
  */
-import type { ConversationMessage, InboxSnapshot, ReadResult } from '../lib/messages';
+import { offsetFromClock, parseClock } from '../lib/buyerTime';
+import type { BuyerHeader, ConversationRead, ConversationMessage, InboxSnapshot, ReadResult } from '../lib/messages';
 import { avatarUsername, parseRow, type InboxRow } from '../lib/inboxRow';
-import { CONVERSATION, CONVERSATION_UI_TEXT, HEADER, INBOX } from '../lib/selectors';
+import { CONVERSATION, CONVERSATION_HEADER, CONVERSATION_UI_TEXT, HEADER, INBOX } from '../lib/selectors';
 
 /** Resolves with the first match, or null after `timeoutMs`. */
 export function waitFor(selector: string, timeoutMs: number, root: ParentNode = document): Promise<Element | null> {
@@ -167,12 +168,64 @@ export function buyerMessages(all: ParsedMessage[], limit: number, myUsername?: 
     .map(({ id, time, text, files }) => ({ id, time, text, files }));
 }
 
-/** The buyer's last `limit` messages, oldest first, read from the open conversation. */
-export async function readConversation(limit: number, myUsername?: string): Promise<ReadResult<ConversationMessage[]>> {
+/**
+ * The buyer's last `limit` messages, oldest first, read from the open
+ * conversation, plus the header (buyer's UTC offset) when it is shown.
+ */
+export async function readConversation(limit: number, myUsername?: string): Promise<ReadResult<ConversationRead>> {
   const first = await waitFor(CONVERSATION.message, 15_000);
-  if (!first) return { ok: true, value: [] };
-  if (first.parentElement) await waitForQuiet(first.parentElement, 1200, 6000);
-  return { ok: true, value: buyerMessages(parseConversation(), limit, myUsername ?? readLoggedInUsername() ?? undefined) };
+  if (first?.parentElement) await waitForQuiet(first.parentElement, 1200, 6000);
+  const messages = first ? buyerMessages(parseConversation(), limit, myUsername ?? readLoggedInUsername() ?? undefined) : [];
+  return { ok: true, value: { messages, header: readBuyerHeader(conversationUsername(location.pathname), Date.now()) } };
+}
+
+/** "/inbox/some_buyer" → "some_buyer"; '' on other pages. */
+export function conversationUsername(path: string): string {
+  const m = /^\/inbox\/([A-Za-z0-9_.-]{1,64})\/?$/.exec(path);
+  return m ? m[1]! : '';
+}
+
+/**
+ * The buyer's local time from the conversation header: a <time> whose next
+ * element says "(local time)". Returns the UTC offset it implies at `now`.
+ * The header avatar must name `username` (when it has one), so a header
+ * left over from the previous conversation during a page change is not
+ * taken for this buyer. Null when there is no such clock.
+ */
+export function readBuyerHeader(username: string, now: number, root: ParentNode = document): BuyerHeader | null {
+  if (!username) return null;
+  for (const header of Array.from(root.querySelectorAll(CONVERSATION_HEADER.header))) {
+    const clock = Array.from(header.querySelectorAll(CONVERSATION_HEADER.clock)).find(
+      (t) => oneLine(t.nextElementSibling?.textContent).toLowerCase() === CONVERSATION_HEADER.clockLabel,
+    );
+    if (!clock) continue;
+    const who = avatarUsername(header.querySelector(CONVERSATION_HEADER.avatar));
+    if (who && who.toLowerCase() !== username.toLowerCase()) return null;
+    const minutes = parseClock(oneLine(clock.textContent));
+    if (minutes === null) return null;
+    const out: BuyerHeader = { username: who || username, offset: offsetFromClock(minutes, now), clock: oneLine(clock.textContent) };
+    const country = readCountry(root);
+    if (country) out.country = country;
+    return out;
+  }
+  return null;
+}
+
+/**
+ * The buyer's country from the details pane: the list item whose label is
+ * exactly "From". '' when the pane is closed or has no such row. Only a
+ * short plain name is accepted.
+ */
+export function readCountry(root: ParentNode = document): string {
+  const H = CONVERSATION_HEADER;
+  for (const pane of Array.from(root.querySelectorAll(H.detailsPane))) {
+    for (const item of Array.from(pane.querySelectorAll(H.detailsItem))) {
+      if (oneLine(item.querySelector(H.detailsLabel)?.textContent) !== H.fromLabel) continue;
+      const value = oneLine(item.querySelector(H.detailsValue)?.textContent);
+      if (/^[\p{L}][\p{L} .,'()&-]{1,59}$/u.test(value)) return value;
+    }
+  }
+  return '';
 }
 
 /**

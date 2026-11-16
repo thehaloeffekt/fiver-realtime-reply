@@ -3,6 +3,7 @@ import { setWebhook } from '../lib/telegram';
 import { connectRelay, disconnectRelay } from './relay';
 import { closeWatchTab, ensureWatchTab } from './watchTab';
 import { describeTelegramError } from './notify';
+import { registerCommands } from './commands';
 import { TelegramError } from '../lib/telegram';
 
 /** How long the options page waits for /start at step 3. */
@@ -24,6 +25,8 @@ export async function connectAndRegisterWebhook(): Promise<{ webhookUrl: string 
     throw new Error(e instanceof TelegramError ? describeTelegramError(e) : String(e));
   }
   await setLocal({ webhookUrl, linkWaitUntil: s.chatId ? undefined : Date.now() + LINK_WAIT_MS });
+  // The "/" menu in Telegram. Not needed for the commands to work, so not awaited.
+  void registerCommands();
   return { webhookUrl };
 }
 

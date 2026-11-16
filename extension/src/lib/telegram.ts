@@ -123,6 +123,16 @@ export function setWebhook(token: string, url: string, secret: string) {
   }, { retries: 2 });
 }
 
+export interface BotCommand {
+  command: string;
+  description: string;
+}
+
+/** The list in Telegram's "/" menu. Every profile on the bot sets the same list. */
+export function setMyCommands(token: string, commands: BotCommand[]) {
+  return callApi<boolean>(token, 'setMyCommands', { commands }, { retries: 2 });
+}
+
 /** Escapes text for parse_mode HTML. Telegram needs only &, < and >. */
 export function escapeHtml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');

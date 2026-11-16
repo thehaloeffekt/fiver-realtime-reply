@@ -4,7 +4,7 @@ import { formatAlert } from '../src/lib/format';
 
 describe('callback_data format', () => {
   it('encodes c|{accountId}|{action}|{arg}', () => {
-    expect(encodeCallback('ab12cd34', 'full', 'm_rohn')).toBe('c|ab12cd34|full|m_rohn');
+    expect(encodeCallback('ab12cd34', 'full', 'buyer_one')).toBe('c|ab12cd34|full|buyer_one');
     expect(encodeCallback('ab12cd34', 'check')).toBe('c|ab12cd34|check|');
   });
 
@@ -56,14 +56,14 @@ describe('who handles a button press', () => {
 
 describe('alert message', () => {
   it('escapes HTML and builds the three buttons', () => {
-    const { html, keyboard } = formatAlert('Shop <A&B>', { username: 'm_rohn', displayName: 'Mira <script>' }, 'if a < b && c > d', 'ab12cd34');
+    const { html, keyboard } = formatAlert('Shop <A&B>', { username: 'buyer_one', displayName: 'Buyer <script>' }, 'if a < b && c > d', 'ab12cd34');
     expect(html).toBe(
-      '<b>Shop &lt;A&amp;B&gt;</b>\nMessage from <b>Mira &lt;script&gt;</b> (@m_rohn)\nif a &lt; b &amp;&amp; c &gt; d',
+      '<b>Shop &lt;A&amp;B&gt;</b>\nMessage from <b>Buyer &lt;script&gt;</b> (@buyer_one)\nif a &lt; b &amp;&amp; c &gt; d',
     );
     expect(keyboard).toEqual([
-      [{ text: 'Open inbox', url: 'https://www.fiverr.com/inbox/m_rohn' }],
+      [{ text: 'Open inbox', url: 'https://www.fiverr.com/inbox/buyer_one' }],
       [
-        { text: 'Full message', callback_data: 'c|ab12cd34|full|m_rohn' },
+        { text: 'Full message', callback_data: 'c|ab12cd34|full|buyer_one' },
         { text: 'Check now', callback_data: 'c|ab12cd34|check|' },
       ],
     ]);
