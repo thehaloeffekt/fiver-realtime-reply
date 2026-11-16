@@ -1,5 +1,6 @@
 import { browser } from 'wxt/browser';
 import type { DiagEntry } from './diagnostics';
+import type { SavedListState } from './listState';
 import type { CaptureKind } from './selectors';
 import { DEFAULT_RELAY_URL } from './constants';
 
@@ -16,19 +17,27 @@ export interface LocalState {
   linkWaitUntil?: number;
   accountId?: string;
   label?: string;
-  /** Logged-in Fiverr username read from the page (needs HEADER selector). */
+  /** Logged-in Fiverr username, read from the profile button in the page header. */
   detectedUsername?: string;
   settings: Settings;
   recentAlerts: RecentAlert[];
   lastAlertAt?: number;
+  /** Last "Unread" chip count (unread conversations) after a reload. */
   lastUnread?: number;
+  /**
+   * The watch tab's inbox list per conversation, kept current while the tab
+   * runs. After a reload (or at browser start) the fresh list is compared
+   * with it, so messages that arrived in between still alert.
+   */
+  listState?: SavedListState;
   seenUpdateIds: number[];
   /** Claims for alerts sent while the relay was down; sent on reconnect. */
   pendingClaims: Array<{ chatId: number; messageId: number }>;
   captures: Partial<Record<CaptureKind, Capture>>;
   /**
-   * Display name (lowercased) → username, learned from toasts. The inbox list
-   * shows only display names; this lets list alerts link to the conversation.
+   * Display name (lowercased) → username, learned from toasts. Only a
+   * fallback now: list rows carry the username themselves. Used when a row
+   * was read by the text fallback, which has no username.
    */
   knownUsers: Record<string, string>;
   /** Background diagnostics (debug mode): the last 300 entries from Fiverr pages. */
@@ -89,6 +98,8 @@ export interface SessionState {
   presence: PresenceAccount[];
   telegram: { lastError?: string; lastErrorAt?: number; lastOkAt?: number };
   dedupe: Array<[string, number]>;
+  /** Last time the watch tab was reloaded because its page looked stale. */
+  lastStaleReloadAt?: number;
 }
 
 export type RelayPhase = 'idle' | 'connecting' | 'connected' | 'offline';
@@ -192,5 +203,10 @@ export function isConfigured(s: LocalState): s is LocalState & Required<Pick<Loc
 }
 
 export function labelOf(s: LocalState): string {
-  return s.label?.trim() || s.detectedUsername || 'Fiverr account';
+  return knownLabel(s) ?? 'Fiverr account';
+}
+
+/** The label the user saved, else the username read from Fiverr, else null. */
+export function knownLabel(s: LocalState): string | null {
+  return s.label?.trim() || s.detectedUsername || null;
 }

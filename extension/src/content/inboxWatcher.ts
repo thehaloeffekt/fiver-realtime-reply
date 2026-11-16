@@ -13,8 +13,11 @@
  * catches a new message when the count does not move (e.g. a capped badge).
  *
  * Rows that are already there when the list first appears are the baseline
- * and never alert. State is kept per display name, not per element, so if
- * React re-mounts the rows nothing looks new; and a batch that adds more than
+ * and never alert. (The gap while the watch tab reloads is covered by the
+ * background, which compares the fresh list with the saved state; see
+ * src/lib/listState.ts.) State is kept per username, not per element, so if
+ * React re-mounts the rows nothing looks new, and two buyers with the same
+ * display name stay apart. A batch that adds more than
  * one row (the list re-rendered or more rows loaded) only refreshes the
  * baseline. A single new row with an unread count is a new conversation.
  *
@@ -22,54 +25,66 @@
  * hidden tabs delay timers by up to a minute, but observer callbacks run at
  * once. Read-only, like the rest of the content script.
  */
-import { parseRow, type InboxRow, type ListMessage } from '../lib/inboxRow';
+import { parseRow, rowKey, type InboxRow, type ListMessage } from '../lib/inboxRow';
+import { isNewMessage, toListMessage, toRowState, type RowState } from '../lib/listState';
 import { INBOX } from '../lib/selectors';
-
-interface RowState {
-  unread: number;
-  preview: string;
-  mine: boolean;
-}
 
 /** New rows in the first seconds after the list appears are part of the page load. */
 const SETTLE_AFTER_ATTACH_MS = 5000;
 
-const nameKey = (name: string) => name.replace(/\s+/g, ' ').trim().toLowerCase();
+export interface InboxListHooks {
+  /** The per-conversation state changed (sent to the background to be saved). */
+  onState?: (rows: Record<string, RowState>) => void;
+  /** The list appeared (true) or disappeared (false). */
+  onPresence?: (present: boolean) => void;
+}
 
-export function watchInboxList(onMessage: (m: ListMessage) => void): () => void {
+export function watchInboxList(onMessage: (m: ListMessage) => void, hooks: InboxListHooks = {}): () => void {
   let list: Element | null = null;
   let attachedAt = 0;
   let listObserver: MutationObserver | null = null;
+  let present: boolean | null = null;
   const state = new Map<string, RowState>();
+  let sentSignature = '';
 
   const rowsOf = (el: Element) => Array.from(el.children).filter((c) => c.matches(INBOX.row));
+
+  const report = () => {
+    if (!hooks.onState) return;
+    const rows = Object.fromEntries(state);
+    const sig = JSON.stringify(rows);
+    if (sig === sentSignature) return; // e.g. only the "3 minutes" text ticked
+    sentSignature = sig;
+    hooks.onState(rows);
+  };
+  const setPresent = (p: boolean) => {
+    if (p === present) return;
+    present = p;
+    hooks.onPresence?.(p);
+  };
 
   /** Records the current rows without alerting. */
   const baseline = (el: Element) => {
     for (const row of rowsOf(el)) {
       const r = parseRow(row);
-      if (r && !r.typing) state.set(nameKey(r.name), { unread: r.unread, preview: r.preview, mine: r.mine });
+      if (r && !r.typing) state.set(rowKey(r), toRowState(r));
     }
+    report();
   };
 
   const check = (r: InboxRow, isNewTopRow: boolean) => {
-    const key = nameKey(r.name);
+    const key = rowKey(r);
     const prev = state.get(key);
     if (r.typing) return; // keep the last real preview; "Typing..." is not a message
-    state.set(key, { unread: r.unread, preview: r.preview, mine: r.mine });
-    if (r.mine || r.unread === 0) return;
+    state.set(key, toRowState(r));
     if (!prev) {
       // A conversation that was not in the list: alert only for a single new
       // row at the top, which is where Fiverr puts a new conversation.
-      if (isNewTopRow) onMessage({ displayName: r.name, body: r.preview, count: Math.max(1, r.unread) });
+      if (isNewTopRow && !r.mine && r.unread > 0) onMessage(toListMessage(r, r.unread));
       return;
     }
-    const more = r.unread - prev.unread;
-    if (more > 0 || r.preview !== prev.preview || prev.mine) {
-      onMessage({ displayName: r.name, body: r.preview, count: Math.max(1, more) });
-    }
+    if (isNewMessage(prev, r)) onMessage(toListMessage(r, r.unread - prev.unread));
   };
-
   const onMutations = (ms: MutationRecord[]) => {
     const l = list;
     if (!l) return;
@@ -94,6 +109,7 @@ export function watchInboxList(onMessage: (m: ListMessage) => void): () => void 
       const r = parseRow(row);
       if (r) check(r, fresh[0] === row && rows[0] === row);
     }
+    report();
   };
 
   const attach = (el: Element) => {
@@ -103,12 +119,20 @@ export function watchInboxList(onMessage: (m: ListMessage) => void): () => void 
     baseline(el);
     listObserver = new MutationObserver(onMutations);
     listObserver.observe(el, { childList: true, subtree: true, characterData: true });
+    setPresent(true);
   };
 
   const find = () => {
     if (list?.isConnected) return;
     const row = document.querySelector(INBOX.row);
     if (row?.parentElement) attach(row.parentElement);
+    else {
+      if (list) {
+        listObserver?.disconnect();
+        list = null;
+      }
+      setPresent(false);
+    }
   };
 
   // Cheap while the list is live: one isConnected check per batch.

@@ -1,8 +1,7 @@
-import { DEDUPE_WINDOW_MS, Deduper, REPLAY_WINDOW_MS, SenderGate, dedupeKey, senderKey, type AlertSource } from '../lib/dedupe';
-import { formatAlert, formatUnread } from '../lib/format';
+import { DEDUPE_WINDOW_MS, Deduper, REPLAY_WINDOW_MS, SenderGate, dedupeKey, senderId, senderKey, type AlertSource } from '../lib/dedupe';
+import { formatAlert } from '../lib/format';
 import { INBOX_URL } from '../lib/constants';
 import type { ListMessage } from '../lib/inboxRow';
-import type { InboxSnapshot } from '../lib/messages';
 import { getLocal, getSession, isConfigured, labelOf, setLocal, setSession, updateLocal, type RecentAlert } from '../lib/storage';
 import { describeBody, type Toast } from '../lib/toast';
 import { notify } from './notify';
@@ -26,7 +25,7 @@ function remember(alert: RecentAlert) {
 interface Incoming {
   source: AlertSource;
   displayName: string;
-  /** Empty when not known (list messages from a buyer we never saw in a toast). */
+  /** Empty only when neither the row nor the name → username map had it. */
   username: string;
   body: string;
   /** Toast shown when a long-hidden tab became visible again. */
@@ -51,12 +50,16 @@ export async function handleToast(toast: Toast): Promise<void> {
   return handleIncoming({ source: 'toast', displayName: toast.displayName, username: toast.username, body: toast.body, replay: toast.replay });
 }
 
+const USERNAME = /^[A-Za-z0-9_.-]{1,64}$/;
+
 /** A new message seen in the /inbox conversation list (works in a hidden tab). */
 export async function handleListMessage(m: ListMessage): Promise<void> {
   const displayName = String(m.displayName ?? '').trim().slice(0, 100);
   if (!displayName) return;
-  const { knownUsers } = await getLocal();
-  const username = knownUsers[senderKey(displayName)] ?? '';
+  // The row's avatar gives the username. The map learned from toasts is only
+  // a fallback, for a row read without its attributes.
+  let username = typeof m.username === 'string' && USERNAME.test(m.username) ? m.username : '';
+  if (!username) username = (await getLocal()).knownUsers[senderKey(displayName)] ?? '';
   const count = Number.isFinite(m.count) ? Math.max(1, Math.min(99, Math.floor(m.count))) : 1;
   return handleIncoming({ source: 'list', displayName, username, body: String(m.body ?? '').slice(0, 5000), more: count - 1 });
 }
@@ -66,16 +69,21 @@ async function handleIncoming(m: Incoming): Promise<void> {
   const s = await getLocal();
   if (!s.settings.sendAlerts || !s.accountId) return;
 
-  const body = describeBody(m.body);
+  const described = describeBody(m.body);
+  // Some unread rows in the list have an empty preview: that is not an empty message.
+  const body = described.kind === 'empty' && m.source === 'list' ? { ...described, text: 'New message (no preview in the inbox list). Check Fiverr.' } : described;
   if (body.kind === 'attachment' && !s.settings.attachmentAlerts) return;
 
   // Check and record in one synchronous step (no await in between), so the
   // same message from two tabs, or from the toast and the list, cannot both pass.
   const now = Date.now();
-  const key = dedupeKey(s.accountId, m.displayName, m.body);
+  // Keyed on the username, so two buyers with the same display name stay apart.
+  if (!m.username) m.username = s.knownUsers[senderKey(m.displayName)] ?? '';
+  const sender = senderId(m.username, m.displayName);
+  const key = dedupeKey(s.accountId, sender, m.body);
   // A replayed toast is old news if this message was alerted in the last 2 hours.
   if (!deduper.take(key, now, m.replay ? REPLAY_WINDOW_MS : DEDUPE_WINDOW_MS)) return;
-  if (!senderGate.take(senderKey(m.displayName), m.source, body.kind === 'text', now)) return;
+  if (!senderGate.take(sender, m.source, body.kind === 'text', now)) return;
   void setSession({ dedupe: deduper.entries() });
 
   const recent: RecentAlert = { at: now, displayName: m.displayName, username: m.username, text: body.text, status: 'sent' };
@@ -108,20 +116,4 @@ export async function sendTestAlert(): Promise<void> {
   keyboard[0] = [{ text: 'Open inbox', url: INBOX_URL }];
   keyboard[1] = keyboard[1]!.map((b) => (b.callback_data?.includes('|full|') ? { ...b, callback_data: `c|${s.accountId}|full|` } : b));
   await notify(html, { keyboard, claim: true, retries: 3 });
-}
-
-/**
- * After each watch-tab reload: alert when the unread count went up. The
- * first reading after setup only sets the baseline.
- */
-export async function afterReload(snapshot: InboxSnapshot): Promise<void> {
-  if (!snapshot.unread.ok) return;
-  const n = snapshot.unread.value;
-  const s = await getLocal();
-  const previous = s.lastUnread;
-  await setLocal({ lastUnread: n });
-  if (previous === undefined || n <= previous) return;
-  if (!s.settings.sendAlerts || !s.settings.unreadCheck || !isConfigured(s)) return;
-  const { html, keyboard } = formatUnread(labelOf(s), n);
-  await notify(html, { keyboard, claim: true, retries: 3 }).catch((e) => console.warn('[unread] send failed', e));
 }

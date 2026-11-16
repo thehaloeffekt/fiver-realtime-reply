@@ -1,8 +1,12 @@
 /**
  * Parses one row of the /inbox conversation list.
  *
- * The row (`[data-testid="contact"]`) has hashed class names only, so it is
- * read by the order of its text pieces, as seen in the real hidden-tab log:
+ * Main path (parseRowStructure): the row's data-track attributes, confirmed
+ * from a real capture (see INBOX in selectors.ts). The avatar's
+ * `data-track-value` is the buyer's username, so every row has one.
+ *
+ * Fallback (parseRowPieces): the order of the row's text, as seen in the
+ * real hidden-tab log, in case Fiverr drops the attributes:
  *
  *   "M · Miracle R · Just now · Great what's the update · 1"
  *    │    │           │          │                         └ unread count (only when unread)
@@ -11,23 +15,25 @@
  *    │    └ display name (the piece right before the time)
  *    └ avatar initial (only when there is no photo)
  *
- *   "M · Miracle R · 1 minute · Me: · Yep I've gotten it…"   last message is mine
- *   "M · Miracle R · 3 minutes · Typing... · 2"              buyer is typing
- *
- * The time piece is the anchor: everything before it is the name, everything
- * after it is the message. A row without a recognisable time is not parsed.
+ * The fallback has no username.
  */
+import { senderId } from './dedupe';
+import { INBOX } from './selectors';
 
 /** A new incoming message seen in the inbox list (content script → background). */
 export interface ListMessage {
+  /** Buyer's Fiverr username; empty only if the row had no avatar attribute. */
+  username: string;
   displayName: string;
-  /** Preview text of the newest message. */
+  /** Preview text of the newest message (the full text; may be long). */
   body: string;
   /** How many new messages this change stands for (unread count delta, at least 1). */
   count: number;
 }
 
 export interface InboxRow {
+  /** Buyer's username from the avatar; '' when only the text fallback worked. */
+  username: string;
   /** Display name, as in the toast's strong.display-name. */
   name: string;
   /** Relative time text, e.g. "Just now", "3 minutes". */
@@ -40,6 +46,14 @@ export interface InboxRow {
   typing: boolean;
   /** Last message preview, without the "Me:" prefix. May be empty. */
   preview: string;
+}
+
+/**
+ * Per-conversation key for state and dedupe: the username when known (two
+ * buyers can share a display name, never a username), else the display name.
+ */
+export function rowKey(r: Pick<InboxRow, 'username' | 'name'>): string {
+  return senderId(r.username, r.name);
 }
 
 const UNITS = '(?:sec|second|min|minute|hr|hour|day|week|wk|month|mo|year|yr)s?';
@@ -90,9 +104,51 @@ export function parseRowPieces(pieces: string[]): InboxRow | null {
   }
 
   const preview = after.join(' ').trim();
-  return { name, time: pieces[t]!, unread, mine, typing: TYPING.test(preview), preview };
+  return { username: '', name, time: pieces[t]!, unread, mine, typing: TYPING.test(preview), preview };
+}
+
+const USERNAME = /^[A-Za-z0-9_.-]{1,64}$/;
+const oneLine = (s: string | null | undefined) => (s ?? '').replace(/\s+/g, ' ').trim();
+
+/** Username from an avatar element: `data-track-value`, or the figure's `title`. */
+export function avatarUsername(avatar: Element | null): string {
+  if (!avatar) return '';
+  const v = oneLine(avatar.getAttribute('data-track-value')) || oneLine(avatar.querySelector('figure[title]')?.getAttribute('title'));
+  return USERNAME.test(v) ? v : '';
+}
+
+/** Reads a row by its attributes. Null when the row does not have the known shape. */
+export function parseRowStructure(row: Element): InboxRow | null {
+  const name = oneLine(row.querySelector(INBOX.rowName)?.textContent);
+  const excerpt = row.querySelector(INBOX.rowExcerpt);
+  if (!name || !excerpt) return null;
+  const username = avatarUsername(row.querySelector(INBOX.rowAvatar));
+
+  // "Me: " is its own span at the start of the preview.
+  const span = excerpt.querySelector(INBOX.rowPreview);
+  const raw = (span ?? excerpt).textContent ?? '';
+  const first = span?.firstElementChild;
+  const mine = Boolean(first && ME.test(oneLine(first.textContent))) || ME.test(raw.trimStart());
+  // Keep the line breaks of a long message; only trim the ends.
+  const preview = (mine ? raw.trimStart().replace(ME, '') : raw).trim();
+
+  let unread = 0;
+  for (const p of Array.from(row.querySelectorAll(INBOX.rowCount))) {
+    if (excerpt.contains(p)) continue;
+    const m = COUNT.exec(oneLine(p.textContent));
+    if (m) unread = Number(m[1]);
+  }
+  return {
+    username,
+    name,
+    time: oneLine(row.querySelector(INBOX.rowTime)?.textContent),
+    unread,
+    mine,
+    typing: TYPING.test(oneLine(preview)),
+    preview,
+  };
 }
 
 export function parseRow(row: Element): InboxRow | null {
-  return parseRowPieces(rowPieces(row));
+  return parseRowStructure(row) ?? parseRowPieces(rowPieces(row));
 }

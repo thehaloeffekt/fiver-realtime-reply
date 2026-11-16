@@ -5,12 +5,13 @@
 import { decodeCallback, isCallbackForMe } from '../lib/callback';
 import { INBOX_URL, inboxUrlFor } from '../lib/constants';
 import { formatTime, truncate } from '../lib/format';
-import type { InboxSnapshot } from '../lib/messages';
-import { getLocal, getSession, labelOf, setLocal, type LocalState } from '../lib/storage';
+import type { ConversationMessage, InboxSnapshot } from '../lib/messages';
+import { getLocal, getSession, knownLabel, labelOf, setLocal, type LocalState } from '../lib/storage';
 import { escapeHtml } from '../lib/telegram';
 import { answerCallback, notify, sendTo } from './notify';
 import { isRelayOpen } from './relay';
-import { readConversation, reloadAndRead } from './watchTab';
+import { reloadAndCompare } from './listSync';
+import { readConversation } from './watchTab';
 
 type Json = Record<string, any>;
 
@@ -55,7 +56,7 @@ async function onMessage(message: Json, routed: boolean) {
       await setLocal({ chatId: chat.id });
       if (s.linkWaitUntil && s.linkWaitUntil > Date.now()) {
         await setLocal({ linkWaitUntil: undefined });
-        await sendTo(chat.id, `Linked. Alerts for <b>${escapeHtml(labelOf(s))}</b> will come to this chat.`);
+        await sendTo(chat.id, linkedText(await getLocal()));
       }
     }
     return;
@@ -67,7 +68,7 @@ async function onMessage(message: Json, routed: boolean) {
     case 'start':
       if (s.linkWaitUntil && s.linkWaitUntil > Date.now()) {
         await setLocal({ linkWaitUntil: undefined });
-        await notify(`Linked. Alerts for <b>${escapeHtml(labelOf(s))}</b> will come to this chat.`);
+        await notify(linkedText(s));
       }
       return;
     case 'check':
@@ -87,6 +88,24 @@ async function onMessage(message: Json, routed: boolean) {
       }
       return;
   }
+}
+
+/**
+ * The "Linked" reply. Setup links the chat (step 3) before the user names
+ * the account (step 4), so the label may not exist yet. Use the saved label
+ * or the username read from Fiverr, and never the "Fiverr account"
+ * placeholder: without a name, say where to set one. Saving the label later
+ * sends labelSavedText().
+ */
+export function linkedText(s: LocalState): string {
+  const name = knownLabel(s);
+  return name
+    ? `Linked. Alerts for <b>${escapeHtml(name)}</b> will come to this chat.`
+    : 'Linked. Alerts from this Chrome profile will come to this chat. Name the account in step 4 of the setup page; I will confirm the name here.';
+}
+
+export function labelSavedText(label: string): string {
+  return `Account named <b>${escapeHtml(label)}</b>. Alerts from this Chrome profile start with this name.`;
 }
 
 const HELP = [
@@ -132,18 +151,24 @@ function missingNote(what: string, verb: 'is' | 'are', missing?: string, error?:
   return `${what} could not be read${error ? `: ${escapeHtml(error)}` : ''}.`;
 }
 
+/** "/check" and "Check now": the Unread chip count, then each unread row with name and username. */
 export function formatCheck(label: string, snap: InboxSnapshot): string {
   const lines = [`<b>${escapeHtml(label)}</b>`];
   if (snap.unread.ok) {
     const n = snap.unread.value;
-    lines[0] += `: ${n === 0 ? 'no unread messages' : `${n} unread ${n === 1 ? 'message' : 'messages'}`}`;
+    lines[0] += `: ${n === 0 ? 'no unread conversations' : `${n} unread ${n === 1 ? 'conversation' : 'conversations'}`}`;
   } else {
     lines.push(missingNote('The unread count', 'is', snap.unread.missing, snap.unread.error));
   }
-  if (snap.names.ok) {
-    for (const name of snap.names.value.slice(0, 20)) lines.push(`• ${escapeHtml(name)}`);
+  if (snap.rows.ok) {
+    const unread = snap.rows.value.filter((r) => r.unread > 0);
+    for (const r of unread.slice(0, 20)) {
+      const who = r.username ? `${escapeHtml(r.name)} (@${escapeHtml(r.username)})` : escapeHtml(r.name);
+      lines.push(`• ${who}: ${r.unread} unread`);
+    }
+    if (unread.length > 20) lines.push(`…and ${unread.length - 20} more`);
   } else if (!snap.unread.ok || snap.unread.value > 0) {
-    lines.push(missingNote('The names', 'are', snap.names.missing, snap.names.error));
+    lines.push(missingNote('The conversation list', 'is', snap.rows.missing, snap.rows.error));
   }
   return lines.join('\n');
 }
@@ -152,14 +177,26 @@ async function replyCheck(s: LocalState, replyTo?: number) {
   const label = labelOf(s);
   let html: string;
   try {
-    const snap = await reloadAndRead();
-    // The user sees the count in this reply; only move the baseline.
-    if (snap.unread.ok) await setLocal({ lastUnread: snap.unread.value });
+    // The reload is a gap like any other: the compare alerts for messages
+    // that arrived during it, before this summary is sent.
+    const snap = await reloadAndCompare();
     html = formatCheck(label, snap);
   } catch (err) {
     html = `<b>${escapeHtml(label)}</b>: check failed. ${escapeHtml(String((err as Error).message ?? err))}`;
   }
   await notify(html, { replyTo, keyboard: [[{ text: 'Open inbox', url: INBOX_URL }]] });
+}
+
+/** One line per message: "Nov 15, 9:49 PM: text [file: name]". Files are named, never sent. */
+export function formatConversation(messages: ConversationMessage[]): string {
+  if (!messages.length) return 'No messages from the buyer found.';
+  return messages
+    .map((m) => {
+      const parts = [m.text ? escapeHtml(truncate(m.text, 600)) : '', ...m.files.map((f) => `[file: ${escapeHtml(truncate(f, 120))}]`)].filter(Boolean);
+      const when = m.time ? `<i>${escapeHtml(m.time)}</i>: ` : '';
+      return `${when}${parts.join(' ') || '(no text)'}`;
+    })
+    .join('\n');
 }
 
 async function replyFull(s: LocalState, username: string, replyTo?: number) {
@@ -168,17 +205,16 @@ async function replyFull(s: LocalState, username: string, replyTo?: number) {
   let body: string;
   try {
     const res = await readConversation(username, 10);
-    if (res.ok) {
-      body = res.value.length
-        ? res.value.map((m, i) => `${i + 1}. ${escapeHtml(truncate(m.text, 600))}`).join('\n')
-        : 'No messages from the buyer found.';
-    } else {
-      body = missingNote('The conversation', 'is', res.missing, res.error);
-    }
+    body = res.ok ? formatConversation(res.value) : missingNote('The conversation', 'is', res.missing, res.error);
   } catch (err) {
     body = `Could not read the conversation. ${escapeHtml(String((err as Error).message ?? err))}`;
   }
-  const html = truncate(`${header}\n${body}\n\n<i>Opening the conversation marked it as read on Fiverr.</i>`, 4000);
+  const footer = '\n\n<i>Opening the conversation marked it as read on Fiverr.</i>';
+  // Keep under Telegram's 4096 limit without cutting an HTML tag: drop the
+  // oldest lines first.
+  const lines = body.split('\n');
+  while (lines.length > 1 && header.length + footer.length + lines.join('\n').length + 1 > 4000) lines.shift();
+  const html = `${header}\n${lines.join('\n')}${footer}`;
   await notify(html, { replyTo, keyboard: [[{ text: 'Open conversation', url: inboxUrlFor(username) }]] });
 }
 
