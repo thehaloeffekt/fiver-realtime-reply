@@ -5,9 +5,10 @@
  * - Never use hashed class names (for example `effeba9` or `_4acffc`). Fiverr
  *   regenerates them on each build. Use semantic class names, data-testid
  *   values, element types and href patterns.
- * - A selector set to `null` is a placeholder: we have no real HTML sample for
- *   that area yet. Code that needs it reports "selector missing" instead of
- *   guessing. Use the popup's Debug capture to collect a sample, then fill it in.
+ * - Prefer data-testid and data-track-tag / data-track-value attributes:
+ *   they are what Fiverr's own tracking uses, so they change less often.
+ * - Every selector here was checked against a real HTML capture. When Fiverr
+ *   changes its markup, use the popup's Debug capture to collect a new one.
  */
 
 /** Realtime toast notifications. Confirmed from a real sample. */
@@ -30,68 +31,94 @@ export const TOAST_INBOX_PREFIX = 'inbox_';
 export const CONVERSATION_PATH = '/conversations/';
 
 /**
- * Inbox page (https://www.fiverr.com/inbox).
- * Capture with the popup: Debug capture → "Unread badge" and "Inbox list".
+ * Inbox page (https://www.fiverr.com/inbox). Confirmed from real captures
+ * (2026-11-16): tests/fixtures/inbox-list.html, inbox-row.html, unread-chip.html.
+ *
+ *   <div role="button" data-testid="contact">                     row
+ *     <div data-track-tag="avatar" data-track-value="{username}">  username
+ *       <figure title="{username}">                                same value
+ *     <p data-track-tag="text">{display name}</p>
+ *     <time>{relative time}</time>
+ *     <div class="contact-excerpt">                                may be empty
+ *       <span data-track-tag="text"><span>Me: </span>{full last message}</span>
+ *     <p data-track-tag="typography">{unread count}</p>            only when unread
  */
-export const INBOX: {
-  /**
-   * One row of the conversation list. Confirmed from the real hidden-tab
-   * diagnostics log (2026-11-15): `<div role="button" data-testid="contact">`.
-   * Its parent is the list. The row's fields have hashed classes only, so
-   * they are read from the order of its text (src/lib/inboxRow.ts).
-   */
-  row: string;
-  /** Element whose text is the unread message count (for example the badge on the inbox icon). PLACEHOLDER. */
-  unreadBadge: string | null;
-} = {
+export const INBOX = {
+  /** One row of the conversation list. Its parent is the list. */
   row: '[data-testid="contact"]',
-  unreadBadge: null, // TODO(capture: unreadBadge)
-};
-
-/**
- * Conversation page (https://www.fiverr.com/inbox/{username}). PLACEHOLDERS.
- * Capture with the popup: Debug capture → "Conversation messages".
- */
-export const CONVERSATION: {
-  /** One message in the thread. */
-  message: string | null;
+  /** Inside a row: has the username in `data-track-value`. */
+  rowAvatar: '[data-track-tag="avatar"][data-track-value]',
+  /** Inside a row: the first match is the display name. */
+  rowName: 'p[data-track-tag="text"]',
+  rowTime: 'time',
+  /** Inside a row: the last-message preview area (empty on some unread rows). */
+  rowExcerpt: '.contact-excerpt',
+  /** Inside the excerpt: the preview text; its first child span is "Me: " for my own message. */
+  rowPreview: 'span[data-track-tag="text"]',
+  /** Inside a row: the unread count badge is the one whose text is a number. */
+  rowCount: 'p[data-track-tag="typography"]',
   /**
-   * Matches a message sent by the logged-in seller (tested with
-   * `element.matches()` on each message). Messages that do not match are
-   * treated as the buyer's.
+   * The "Unread" filter chip above the list. Its count (a typography <p>
+   * inside it) is the number of unread conversations, not messages.
    */
-  ownMessage: string | null;
-  /** Inside a message: the element with the text. */
-  messageText: string | null;
-  /** Inside a message: one attachment (file or image). Each match becomes "[attachment]". */
-  attachment: string | null;
-} = {
-  message: null, // TODO(capture: conversation)
-  ownMessage: null, // TODO(capture: conversation)
-  messageText: null, // TODO(capture: conversation)
-  attachment: null, // TODO(capture: conversation)
-};
+  unreadChip: 'button[aria-label="Unread"]',
+  unreadChipCount: 'p[data-track-tag="typography"]',
+} as const;
 
 /**
- * Header on any Fiverr page. PLACEHOLDER. Used for the default account label.
- * Capture with the popup: Debug capture → "Account menu".
+ * Conversation page (https://www.fiverr.com/inbox/{username}). Confirmed from
+ * a real capture (2026-11-16): tests/fixtures/conversation.html.
+ *
+ *   <div class="message" id="{conversation uuid}_{message uuid}">
+ *     <div data-track-tag="avatar" data-track-value="{sender username}">
+ *     <div class="message-content">
+ *       <p data-track-tag="typography">{sender name, "Me" for mine}</p>  header row,
+ *       <time>Nov 15, 9:51 PM</time>                                    with the time
+ *       <p data-track-tag="typography">{body}</p>       "1 File" for a file-only message
+ *       <div class="attachment" title="{file name}"> … download_icon … (size)
+ *       <button data-track-tag="text_button">Translate to English</button>
+ *
+ * The id's second half is a version-1 (time-based) UUID whose timestamp is
+ * the message's send time, and every id in the capture is unique, so it is
+ * Fiverr's message id: stable across reloads and unique per message.
  */
-export const HEADER: {
-  /** Element whose text (or href, see `loggedInUsernameAttr`) holds the logged-in username. */
-  loggedInUsername: string | null;
-  /** Read this attribute instead of the text, for example "href". The last path segment is used. */
-  loggedInUsernameAttr: string | null;
-} = {
-  loggedInUsername: null, // TODO(capture: accountMenu)
-  loggedInUsernameAttr: null,
-};
+export const CONVERSATION = {
+  message: 'div.message[id]',
+  /** Inside a message: the sender's username in `data-track-value`. */
+  sender: '[data-track-tag="avatar"][data-track-value]',
+  content: '.message-content',
+  /** Inside the content: the sender name (header) and the body paragraphs. */
+  text: 'p[data-track-tag="typography"]',
+  time: 'time',
+  /** Inside a message: one file; its name is the `title`. */
+  attachment: '.attachment[title]',
+  /** Containers whose text is never part of the body. */
+  attachmentArea: '.attachments-list, .attachment',
+} as const;
+
+/** Interface text that may sit inside a message but is not the buyer's words. */
+export const CONVERSATION_UI_TEXT = ['Translate to English', 'Create an offer'] as const;
+
+/**
+ * Header on any Fiverr page. Confirmed from a real capture
+ * (tests/fixtures/account-menu.html): the profile button holds
+ * `<div data-track-tag="avatar" data-track-value="{my username}">` and its
+ * img has the same value in `alt`. Buyer avatars elsewhere use
+ * alt="Profile Image", and the conversation page has its own <header> with
+ * the buyer's avatar, so the match must be inside `.main-header` or have an
+ * img whose alt equals the value.
+ */
+export const HEADER = {
+  avatar: 'header [data-track-tag="avatar"][data-track-value]',
+  mainHeader: '.main-header',
+} as const;
 
 /** The four areas the Debug capture can collect, with instructions for the user. */
 export const CAPTURE_TARGETS = {
   unreadBadge: {
-    title: 'Unread badge',
-    where: 'Any Fiverr page with at least 1 unread message',
-    pick: 'the unread count on the inbox (envelope) icon',
+    title: 'Unread chip',
+    where: 'https://www.fiverr.com/inbox with at least 1 unread conversation',
+    pick: 'the "Unread" filter chip with its count, above the conversation list',
   },
   inboxList: {
     title: 'Inbox list',

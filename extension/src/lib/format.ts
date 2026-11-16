@@ -34,13 +34,6 @@ export function formatAlert(label: string, toast: Pick<Toast, 'username' | 'disp
   return { html, keyboard };
 }
 
-export function formatUnread(label: string, n: number) {
-  return {
-    html: `<b>${escapeHtml(label)}</b>: ${n} unread ${n === 1 ? 'message' : 'messages'}`,
-    keyboard: [[{ text: 'Open inbox', url: INBOX_URL }]] as InlineKeyboard,
-  };
-}
-
 export function formatTime(ts: number | undefined, now = Date.now()): string {
   if (!ts) return 'never';
   const d = new Date(ts);

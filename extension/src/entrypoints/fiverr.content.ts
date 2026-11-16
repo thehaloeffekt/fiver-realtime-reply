@@ -5,8 +5,9 @@ import { watchInboxList } from '../content/inboxWatcher';
 import { watchToasts } from '../content/observer';
 import type { DiagEntry, DiagKind } from '../lib/diagnostics';
 import { startPicker } from '../content/picker';
-import { readConversation, readInbox, readLoggedInUsername } from '../content/reader';
-import type { BackgroundToContent, ContentToBackground } from '../lib/messages';
+import { readConversation, readInbox, waitForLoggedInUsername } from '../content/reader';
+import type { RowState } from '../lib/listState';
+import type { BackgroundToContent, ContentToBackground, InboxSnapshot, ListStatus } from '../lib/messages';
 
 /**
  * Runs on every Fiverr page. It only reads the page: it never types, clicks
@@ -24,13 +25,47 @@ export default defineContentScript({
     const stopToasts = watchToasts((toast) => send({ type: 'toast', toast }));
     ctx.onInvalidated(stopToasts); // extension reloaded or updated
 
+    // This page's id: its load time. The background uses it to tell a new
+    // page (after a reload) from the one that sent the saved state.
+    const page = String(Math.round(performance.timeOrigin));
+
     // Second detector: the /inbox conversation list stays live in a hidden
     // tab, where Fiverr does not render toasts. Idle on pages without it.
-    const stopList = watchInboxList((message) => send({ type: 'listMessage', message }));
-    ctx.onInvalidated(stopList);
+    // Its state goes to the background, which saves it for the watch tab.
+    let rows: Record<string, RowState> = {};
+    let missingSince: number | null = Date.now();
+    let missingTimer: ReturnType<typeof setTimeout> | undefined;
+    const stopList = watchInboxList((message) => send({ type: 'listMessage', message }), {
+      onState: (r) => {
+        rows = r;
+        send({ type: 'listState', page, rows: r });
+      },
+      onPresence: (present) => {
+        clearTimeout(missingTimer);
+        missingSince = present ? null : Date.now();
+        // On the inbox, a list missing for 60 s means a broken page. The
+        // background reloads it only if this is the watch tab. (A hidden tab
+        // may run this timer late; the background's watchdog checks too.)
+        if (!present && location.pathname.startsWith('/inbox')) {
+          missingTimer = setTimeout(() => send({ type: 'stale', reason: 'no-list' }), 61_000);
+        }
+      },
+    });
+    ctx.onInvalidated(() => {
+      stopList();
+      clearTimeout(missingTimer);
+    });
 
-    const username = readLoggedInUsername();
-    if (username) send({ type: 'username', username });
+    // A page Chrome froze (to save power) may have missed messages and lost
+    // its connection: on resume, ask for a reload of the watch tab.
+    const onResume = () => send({ type: 'stale', reason: 'resume' });
+    document.addEventListener('resume', onResume);
+    ctx.onInvalidated(() => document.removeEventListener('resume', onResume));
+
+    // The profile button in the header has my username (default label).
+    void waitForLoggedInUsername(20_000).then((username) => {
+      if (username) send({ type: 'username', username });
+    });
 
     // Background diagnostics: runs only while Settings → Debug mode is on,
     // and starts or stops in open tabs when the setting changes.
@@ -60,11 +95,17 @@ export default defineContentScript({
           sendResponse('pong');
           return;
         case 'readInbox':
-          readInbox().then(sendResponse, (e) => sendResponse({ unread: { ok: false, error: String(e) }, names: { ok: false, error: String(e) } }));
+          readInbox().then(
+            (snap) => sendResponse({ ...snap, page } satisfies InboxSnapshot),
+            (e) => sendResponse({ page, unread: { ok: false, error: String(e) }, rows: { ok: false, error: String(e) } } satisfies InboxSnapshot),
+          );
           return true;
         case 'readConversation':
-          readConversation(msg.limit).then(sendResponse, (e) => sendResponse({ ok: false, error: String(e) }));
+          readConversation(msg.limit, msg.myUsername).then(sendResponse, (e) => sendResponse({ ok: false, error: String(e) }));
           return true;
+        case 'listStatus':
+          sendResponse({ present: missingSince === null, missingSince, path: location.pathname, page, rows } satisfies ListStatus);
+          return;
         case 'startCapture':
           startPicker(msg.kind, async (html) => send({ type: 'capture', kind: msg.kind, html, url: location.href }));
           sendResponse(true);

@@ -12,6 +12,15 @@ export function senderKey(displayName: string): string {
 }
 
 /**
+ * Who sent it, for keys: the username when known (two buyers can share a
+ * display name, never a username), else the display name.
+ */
+export function senderId(username: string, displayName: string): string {
+  const u = username.trim().toLowerCase();
+  return u ? `u:${u}` : `n:${senderKey(displayName)}`;
+}
+
+/**
  * Body for keys: lowercase, no whitespace, no trailing "…", first 40
  * characters. The toast joins text nodes without spaces and the inbox list
  * joins them with spaces, and a long list preview may be cut (40 letters
@@ -23,12 +32,13 @@ export function bodyKey(body: string): string {
 }
 
 /**
- * Key = account + sender display name + body. Not the toast id: the inbox
- * list has no toast id, and both detectors must give the same key for the
- * same message. The separator cannot appear in any part.
+ * Key = account + sender + body, where sender is senderId() (the username).
+ * Not the toast id: the inbox list has no toast id, and both detectors must
+ * give the same key for the same message. The separator cannot appear in
+ * any part.
  */
-export function dedupeKey(accountId: string, displayName: string, body: string): string {
-  return `${accountId}\u0000${senderKey(displayName)}\u0000${bodyKey(body)}`;
+export function dedupeKey(accountId: string, sender: string, body: string): string {
+  return `${accountId}\u0000${senderKey(sender)}\u0000${bodyKey(body)}`;
 }
 
 /**

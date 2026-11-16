@@ -85,9 +85,9 @@ describe('watchInboxList', () => {
     await setRow(0, "M · Miracle R · 1 minute · Me: · Yep I've gotten it. Will update you soon");
 
     expect(messages).toEqual([
-      { displayName: 'Miracle R', body: "Great what's the update", count: 1 },
-      { displayName: 'Miracle R', body: "Here's some more info", count: 1 },
-      { displayName: 'Miracle R', body: 'Gotten it yet?', count: 1 },
+      { username: '', displayName: 'Miracle R', body: "Great what's the update", count: 1 },
+      { username: '', displayName: 'Miracle R', body: "Here's some more info", count: 1 },
+      { username: '', displayName: 'Miracle R', body: 'Gotten it yet?', count: 1 },
     ]);
   });
 
@@ -101,7 +101,7 @@ describe('watchInboxList', () => {
   it('reports a jump of several messages once, with the count', async () => {
     start(['B · Bob · 2 days · Me: · ok']);
     await setRow(0, 'B · Bob · Just now · third one · 3');
-    expect(messages).toEqual([{ displayName: 'Bob', body: 'third one', count: 3 }]);
+    expect(messages).toEqual([{ username: '', displayName: 'Bob', body: 'third one', count: 3 }]);
   });
 
   it('alerts a row that moves to the top with a new message', async () => {
@@ -110,7 +110,7 @@ describe('watchInboxList', () => {
     robert.innerHTML = rowHtml('R · Robert · Just now · Ready now · 1');
     list.insertBefore(robert, list.firstChild);
     await flush();
-    expect(messages).toEqual([{ displayName: 'Robert', body: 'Ready now', count: 1 }]);
+    expect(messages).toEqual([{ username: '', displayName: 'Robert', body: 'Ready now', count: 1 }]);
   });
 
   it('alerts a single new conversation at the top, not one at the bottom', async () => {
@@ -119,7 +119,7 @@ describe('watchInboxList', () => {
     await flush();
     list.append(makeRow('O · Old Buyer · 1 year · Old message · 2'));
     await flush();
-    expect(messages).toEqual([{ displayName: 'New Buyer', body: 'Hello!', count: 1 }]);
+    expect(messages).toEqual([{ username: '', displayName: 'New Buyer', body: 'Hello!', count: 1 }]);
   });
 
   it('does not alert when the whole list re-renders with new elements', async () => {

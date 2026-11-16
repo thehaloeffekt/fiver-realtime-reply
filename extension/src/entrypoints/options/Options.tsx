@@ -277,6 +277,10 @@ function LinkStep({ local, waiting }: { local: LocalState; waiting: boolean }) {
 
 function LabelStep({ local }: { local: LocalState }) {
   const [label, setLabel] = useState(local.label ?? local.detectedUsername ?? '');
+  // The username may be read from Fiverr after this page opened.
+  useEffect(() => {
+    if (!local.label && local.detectedUsername) setLabel((v) => v || local.detectedUsername!);
+  }, [local.label, local.detectedUsername]);
   const [saved, setSaved] = useState(false);
   const [test, setTest] = useState<{ busy: boolean; result?: string; ok?: boolean }>({ busy: false });
 
@@ -295,7 +299,9 @@ function LabelStep({ local }: { local: LocalState }) {
     <>
       <p className="small muted">
         Alerts start with this name, so you can tell your Fiverr accounts apart. Each Chrome profile has its own.
-        {!local.detectedUsername && ' (Reading your Fiverr username from the page is not set up yet, so type it.)'}
+        {local.detectedUsername
+          ? ` Your Fiverr username, read from the page, is ${local.detectedUsername}.`
+          : ' Open any Fiverr page while logged in and your username fills in here, or type a name.'}
       </p>
       <label className="label" htmlFor="label">
         Account label
@@ -325,7 +331,7 @@ function LabelStep({ local }: { local: LocalState }) {
 const SWITCHES: Array<[keyof Settings, string, string]> = [
   ['sendAlerts', 'Send alerts', 'Send a Telegram message for each new Fiverr message.'],
   ['attachmentAlerts', 'Attachment alerts', 'Also alert for messages that contain only files ("Sent 2 files").'],
-  ['unreadCheck', 'Unread check after reload', 'After each watch-tab reload, alert if the unread count went up.'],
+  ['unreadCheck', 'Catch up after reload', 'After each watch-tab reload or browser start, alert for messages that arrived while the page was not running.'],
   ['keepWatchTab', 'Keep the watch tab open', 'Open the pinned Fiverr inbox tab again if it is closed.'],
   ['debug', 'Debug mode', 'Show the Debug capture tools in the popup, and record background diagnostics on Fiverr pages.'],
 ];

@@ -15,18 +15,23 @@ const LOAD_TIMEOUT_MS = 60_000;
 const CONTENT_TIMEOUT_MS = 25_000;
 
 let queue: Promise<unknown> = Promise.resolve();
+/** Jobs queued or running on the watch tab. While > 0 the tab may be mid-navigation. */
+let pending = 0;
+
+export const watchTabBusy = () => pending > 0;
 let ensuring: Promise<number | null> | null = null;
 /** Times we re-created the tab after the user closed it; stops a fight with the user. */
 let recreations: number[] = [];
 
 /** Runs `fn` with the watch tab id, one job at a time. */
 export function withWatchTab<T>(fn: (tabId: number) => Promise<T>): Promise<T> {
+  pending++;
   const run = queue.then(async () => {
     const tabId = await ensureWatchTab();
     if (tabId == null) throw new Error('No browser window is open for the watch tab.');
     return fn(tabId);
   });
-  queue = run.catch(() => undefined);
+  queue = run.catch(() => undefined).finally(() => pending--);
   return run;
 }
 
@@ -55,12 +60,24 @@ async function doEnsure(): Promise<number | null> {
     tab = await browser.tabs.create({ windowId: target.id, url: INBOX_URL, pinned: true, active: false });
   }
   if (tab.id == null) return null;
+  // A tab restored at browser start may not be loaded yet ("discarded"):
+  // load it, so its content script runs and the catch-up compare happens.
+  if (tab.discarded) await browser.tabs.reload(tab.id).catch(() => undefined);
   // Chrome must not discard it to save memory, or toasts stop arriving.
   await browser.tabs.update(tab.id, { autoDiscardable: false }).catch(() => undefined);
   await setSession({ watchTabId: tab.id });
   const alarm = await browser.alarms.get(RELOAD_ALARM);
   if (!alarm) await scheduleReload();
+  // Its content script may have reported before we knew this tab was ours
+  // (a fast load, or a tab Chrome restored at startup): catch up now.
+  if (onAdopted) void onAdopted(tab.id).catch(() => undefined);
   return tab.id;
+}
+
+let onAdopted: ((tabId: number) => Promise<void>) | null = null;
+/** Called each time a tab becomes the watch tab. */
+export function setOnAdopted(fn: (tabId: number) => Promise<void>) {
+  onAdopted = fn;
 }
 
 /** Called from tabs.onRemoved. Re-creates the watch tab if the setting is on. */
@@ -154,11 +171,30 @@ async function askTab<T>(tabId: number, msg: BackgroundToContent): Promise<T> {
   throw new Error(`The Fiverr page did not answer (${String(lastErr ?? 'timeout')}).`);
 }
 
+/** One try with a short timeout, for a page that may be frozen. Null when it does not answer. */
+export async function askTabOnce<T>(tabId: number, msg: BackgroundToContent, timeoutMs: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((r) => (timer = setTimeout(() => r(null), timeoutMs)));
+  try {
+    const res = await Promise.race([browser.tabs.sendMessage(tabId, msg).catch(() => null), timeout]);
+    return (res ?? null) as T | null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export const readInbox = (tabId: number) => askTab<InboxSnapshot>(tabId, { type: 'readInbox' });
 
-/** Reload + read: used by the reload alarm, "Check now" and /check. */
+/** Called with the live list state just before a reload, to save it. */
+let beforeReload: ((tabId: number) => Promise<void>) | null = null;
+export function setBeforeReload(fn: (tabId: number) => Promise<void>) {
+  beforeReload = fn;
+}
+
+/** Save the list state, reload /inbox, read it: the reload alarm, "Check now", /check, stale reloads. */
 export async function reloadAndRead(): Promise<InboxSnapshot> {
   return withWatchTab(async (tabId) => {
+    await beforeReload?.(tabId).catch(() => undefined);
     await reloadInbox(tabId);
     return readInbox(tabId);
   });
@@ -169,10 +205,11 @@ export async function reloadAndRead(): Promise<InboxSnapshot> {
  * last messages, then go back to /inbox. Opening it marks it read on Fiverr.
  */
 export async function readConversation(username: string, limit = 10): Promise<ReadResult<ConversationMessage[]>> {
+  const { detectedUsername } = await getLocal();
   return withWatchTab(async (tabId) => {
     await navigate(tabId, inboxUrlFor(username), false);
     try {
-      return await askTab<ReadResult<ConversationMessage[]>>(tabId, { type: 'readConversation', limit });
+      return await askTab<ReadResult<ConversationMessage[]>>(tabId, { type: 'readConversation', limit, myUsername: detectedUsername });
     } finally {
       await navigate(tabId, INBOX_URL, false).catch(() => undefined);
     }

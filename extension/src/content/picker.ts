@@ -1,6 +1,6 @@
 /**
  * Debug capture: lets the user point at an area of the Fiverr page and copies
- * its outerHTML. Used to collect samples for the placeholder selectors.
+ * its outerHTML. Used to collect new samples when Fiverr changes its markup.
  *
  * The user does the clicking. The picker swallows that click (and the
  * pointer events around it) in the capture phase, so Fiverr never sees it and

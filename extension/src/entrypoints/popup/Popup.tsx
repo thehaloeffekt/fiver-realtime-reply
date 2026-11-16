@@ -186,14 +186,19 @@ function AlertRow({ alert, now }: { alert: RecentAlert; now: number }) {
 
 function describeSnapshot(s: InboxSnapshot): string {
   const lines: string[] = [];
-  if (s.unread.ok) lines.push(s.unread.value === 0 ? 'No unread messages.' : `${s.unread.value} unread.`);
-  else lines.push(s.unread.missing ? `Unread count: selector ${s.unread.missing} is not set up yet.` : `Unread count: ${s.unread.error}`);
-  if (s.names.ok) lines.push(...s.names.value.map((n) => `• ${n}`));
-  else if (s.names.missing) lines.push(`Names: selector ${s.names.missing} is not set up yet.`);
+  if (s.unread.ok) {
+    const n = s.unread.value;
+    lines.push(n === 0 ? 'No unread conversations.' : `${n} unread ${n === 1 ? 'conversation' : 'conversations'}.`);
+  } else lines.push(`Unread count: ${s.unread.error ?? s.unread.missing ?? 'not readable'}`);
+  if (s.rows.ok) {
+    for (const r of s.rows.value.filter((r) => r.unread > 0).slice(0, 20)) {
+      lines.push(`• ${r.name}${r.username ? ` (@${r.username})` : ''}: ${r.unread}`);
+    }
+  } else lines.push(`List: ${s.rows.error ?? s.rows.missing ?? 'not readable'}`);
   return lines.join('\n');
 }
 
-/** Debug mode: collect HTML samples for the placeholder selectors. */
+/** Debug mode: collect HTML samples when Fiverr changes its markup. */
 function DebugCapture({ local }: { local: LocalState }) {
   const [hint, setHint] = useState<string | null>(null);
   const [copied, setCopied] = useState<CaptureKind | null>(null);

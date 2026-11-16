@@ -1,10 +1,12 @@
 import { browser, type Browser } from 'wxt/browser';
 import { defineBackground } from 'wxt/utils/define-background';
-import { afterReload, handleListMessage, handleToast, sendTestAlert } from '../background/alerts';
-import { handleOffline, handleUpdate } from '../background/commands';
+import { handleListMessage, handleToast, sendTestAlert } from '../background/alerts';
+import { handleOffline, handleUpdate, labelSavedText } from '../background/commands';
+import { onListState, onStale, reloadAndCompare, watchdog } from '../background/listSync';
+import { notify } from '../background/notify';
 import { connectRelay, relayHeartbeat, retryRelayNow, setRelayHandlers } from '../background/relay';
 import { connectAndRegisterWebhook, disconnectProfile, onLinked, waitForStart } from '../background/setup';
-import { RELOAD_ALARM, ensureWatchTab, onTabRemoved, reloadAndRead, scheduleReload } from '../background/watchTab';
+import { RELOAD_ALARM, ensureWatchTab, onTabRemoved, scheduleReload } from '../background/watchTab';
 import { FIVERR_ORIGIN } from '../lib/constants';
 import { appendDiag, sanitizeEntries, type DiagEntry } from '../lib/diagnostics';
 import { newAccountId } from '../lib/keys';
@@ -57,6 +59,7 @@ function boot(): Promise<void> {
 async function onAlarm(alarm: Browser.alarms.Alarm) {
   if (alarm.name === RELAY_ALARM) {
     await relayHeartbeat();
+    await watchdog().catch((e) => console.warn('[watch] watchdog failed', e));
     return;
   }
   if (alarm.name === RELOAD_ALARM) {
@@ -64,7 +67,7 @@ async function onAlarm(alarm: Browser.alarms.Alarm) {
     await scheduleReload();
     if (!isConfigured(await getLocal())) return;
     try {
-      await afterReload(await reloadAndRead());
+      await reloadAndCompare();
     } catch (e) {
       console.warn('[watch] reload failed', e);
     }
@@ -76,11 +79,19 @@ let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 function onStorageChanged(changes: Record<string, Browser.storage.StorageChange>, area: string) {
   if (area !== 'local') return;
   // The relay learns botKey, accountId and label at auth: reconnect when they change.
-  if (changes.botKey || changes.relayUrl || changes.label || changes.accountId) {
+  if (changes.botKey || changes.relayUrl || changes.label || changes.accountId || changes.detectedUsername) {
     clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(() => void connectRelay(true).catch(() => undefined), 800);
   }
   if (changes.chatId && changes.chatId.newValue && !changes.chatId.oldValue) void onLinked();
+  // Confirm a new account name in Telegram (the "Linked" reply may have come
+  // before the name was set, see linkedText).
+  if (changes.label) {
+    const label = typeof changes.label.newValue === 'string' ? changes.label.newValue.trim() : '';
+    if (label && label !== changes.label.oldValue) {
+      void getLocal().then((s) => (s.chatId ? notify(labelSavedText(label)) : undefined)).catch(() => undefined);
+    }
+  }
   if (changes.settings) {
     const before = changes.settings.oldValue as { reloadMinMinutes?: number; reloadMaxMinutes?: number } | undefined;
     const after = changes.settings.newValue as { reloadMinMinutes?: number; reloadMaxMinutes?: number } | undefined;
@@ -100,8 +111,15 @@ async function handleMessage(msg: ContentToBackground | UiToBackground, sender: 
         return handleToast(msg.toast);
       case 'listMessage':
         return handleListMessage(msg.message);
+      case 'listState':
+        return onListState(msg.rows, msg.page, sender.tab?.id);
+      case 'stale':
+        return onStale(msg.reason === 'resume' ? 'resume' : 'no-list', sender.tab?.id);
       case 'username':
-        if (/^[A-Za-z0-9_.-]{1,64}$/.test(msg.username)) await setLocal({ detectedUsername: msg.username });
+        // Every Fiverr page sends it; write only a change (it restarts the relay connection).
+        if (/^[A-Za-z0-9_.-]{1,64}$/.test(msg.username) && (await getLocal()).detectedUsername !== msg.username) {
+          await setLocal({ detectedUsername: msg.username });
+        }
         return;
       case 'capture':
         return updateLocal('captures', (c) => ({ ...c, [msg.kind]: { at: Date.now(), url: msg.url, html: msg.html.slice(0, 500_000) } }));
@@ -125,8 +143,7 @@ async function handleMessage(msg: ContentToBackground | UiToBackground, sender: 
     case 'alert:test':
       return sendTestAlert();
     case 'check:now': {
-      const snapshot = await reloadAndRead();
-      if (snapshot.unread.ok) await setLocal({ lastUnread: snapshot.unread.value });
+      const snapshot = await reloadAndCompare();
       return { snapshot };
     }
     case 'watch:ensure': {
