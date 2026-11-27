@@ -2,6 +2,7 @@ import { DEDUPE_WINDOW_MS, Deduper, REPLAY_WINDOW_MS, SenderGate, dedupeKey, sen
 import { formatBuyerAt } from '../lib/buyerTime';
 import { myZone } from '../lib/myZone';
 import { formatAlert } from '../lib/format';
+import { sliceSafe } from '../lib/split';
 import { INBOX_URL } from '../lib/constants';
 import type { ListMessage } from '../lib/inboxRow';
 import type { ThreadMessage } from '../lib/messages';
@@ -73,14 +74,14 @@ const USERNAME = /^[A-Za-z0-9_.-]{1,64}$/;
 
 /** A new message seen in the /inbox conversation list (works in a hidden tab). */
 export async function handleListMessage(m: ListMessage): Promise<void> {
-  const displayName = String(m.displayName ?? '').trim().slice(0, 100);
+  const displayName = sliceSafe(String(m.displayName ?? '').trim(), 100);
   if (!displayName) return;
   // The row's avatar gives the username. The map learned from toasts is only
   // a fallback, for a row read without its attributes.
   let username = typeof m.username === 'string' && USERNAME.test(m.username) ? m.username : '';
   if (!username) username = (await getLocal()).knownUsers[senderKey(displayName)] ?? '';
   const count = Number.isFinite(m.count) ? Math.max(1, Math.min(99, Math.floor(m.count))) : 1;
-  const body = String(m.body ?? '').slice(0, 5000);
+  const body = sliceSafe(String(m.body ?? ''), 5000);
   if (m.read === true) {
     // Read at once: the conversation is open in some tab. If the user is
     // looking at it, they see the message; otherwise alert (deduped against
@@ -104,14 +105,14 @@ export async function handleThreadMessage(m: ThreadMessage): Promise<void> {
   if (!username || !id) return;
   // Another tab may show this conversation to the user right now.
   if (await conversationInView(username)) return;
-  const text = String(m.text ?? '').slice(0, 5000).trim();
-  const files = (Array.isArray(m.files) ? m.files : []).map((f) => String(f).replace(/\s+/g, ' ').trim().slice(0, 120)).filter(Boolean).slice(0, 10);
+  const text = sliceSafe(String(m.text ?? ''), 5000).trim();
+  const files = (Array.isArray(m.files) ? m.files : []).map((f) => sliceSafe(String(f).replace(/\s+/g, ' ').trim(), 120)).filter(Boolean).slice(0, 10);
   const shownText = [text, ...files.map((f) => `[file: ${f}]`)].filter(Boolean).join(' ');
   if (!shownText) return;
   // Key on the text alone, as the toast and the list show it. A message with
   // only files is "1 File" / "2 Files" in a toast: use the same.
   const keyBody = text || `${files.length} ${files.length === 1 ? 'File' : 'Files'}`;
-  const displayName = String(m.displayName ?? '').replace(/\s+/g, ' ').trim().slice(0, 100) || username;
+  const displayName = sliceSafe(String(m.displayName ?? '').replace(/\s+/g, ' ').trim(), 100) || username;
   return handleIncoming({ source: 'thread', displayName, username, body: shownText, keyBody, shown: { kind: text ? 'text' : 'attachment', text: shownText }, messageId: id });
 }
 

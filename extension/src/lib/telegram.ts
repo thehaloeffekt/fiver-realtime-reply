@@ -5,6 +5,8 @@
  * The token is only ever put into URLs on api.telegram.org.
  */
 
+import { wellFormed } from './split';
+
 const API = 'https://api.telegram.org';
 
 export interface InlineButton {
@@ -98,11 +100,15 @@ export interface SendOptions {
   retries?: number;
 }
 
-/** Sends an HTML message. Alerts use retries = 3. */
+/**
+ * Sends an HTML message. Alerts use retries = 3. Lone surrogates (half an
+ * emoji, from a cut somewhere upstream) are replaced, because Telegram
+ * refuses text that is not valid UTF-8.
+ */
 export function sendMessage(token: string, chatId: number, html: string, opts: SendOptions = {}) {
   const params: Record<string, unknown> = {
     chat_id: chatId,
-    text: html,
+    text: wellFormed(html),
     parse_mode: 'HTML',
     link_preview_options: { is_disabled: true },
   };
@@ -121,6 +127,14 @@ export function setWebhook(token: string, url: string, secret: string) {
     secret_token: secret,
     allowed_updates: ['message', 'callback_query'],
   }, { retries: 2 });
+}
+
+/**
+ * Removes the webhook. Only when the last profile on the bot disconnects:
+ * the webhook is shared by every profile on the bot.
+ */
+export function deleteWebhook(token: string) {
+  return callApi<boolean>(token, 'deleteWebhook', { drop_pending_updates: true }, { retries: 1 });
 }
 
 export interface BotCommand {

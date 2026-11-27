@@ -2,19 +2,17 @@ import { browser, type Browser } from 'wxt/browser';
 import { defineBackground } from 'wxt/utils/define-background';
 import { handleListMessage, handleThreadMessage, handleToast, sendTestAlert } from '../background/alerts';
 import { saveBuyerZone } from '../background/buyerZones';
-import { handleOffline, handleUpdate, labelSavedText, pauseText, registerCommands, setAlertsOn } from '../background/commands';
+import { handleAccountRemoved, handleOffline, handleUpdate, labelSavedText, pauseText, registerCommands, setAlertsOn } from '../background/commands';
 import { onListState, onStale, reloadAndCompare, restWatchTab, watchdog } from '../background/listSync';
 import { notify } from '../background/notify';
 import { connectRelay, relayHeartbeat, retryRelayNow, setRelayHandlers } from '../background/relay';
-import { connectAndRegisterWebhook, disconnectProfile, onLinked, waitForStart } from '../background/setup';
+import { RELAY_ALARM, applyUninstallUrl, connectAndRegisterWebhook, disconnectProfile, ensureRelayAlarm, onLinked, onRemovedRemotely, waitForStart } from '../background/setup';
 import { RELOAD_ALARM, ensureWatchTab, onTabRemoved, scheduleReload } from '../background/watchTab';
 import { FIVERR_ORIGIN } from '../lib/constants';
 import { appendDiag, sanitizeEntries, type DiagEntry } from '../lib/diagnostics';
-import { newAccountId } from '../lib/keys';
+import { newAccountId, newRemovalCode } from '../lib/keys';
 import type { ContentToBackground, UiToBackground } from '../lib/messages';
 import { getLocal, getSession, isConfigured, labelOf, setLocal, updateLocal } from '../lib/storage';
-
-const RELAY_ALARM = 'relay-check';
 
 export default defineBackground({
   type: 'module',
@@ -22,6 +20,8 @@ export default defineBackground({
     setRelayHandlers({
       onUpdate: (update, routed) => void handleUpdate(update, routed),
       onOffline: (accountId, label) => void handleOffline(accountId, label),
+      onAccountRemoved: (accountId, label) => void handleAccountRemoved(accountId, label),
+      onRemoved: () => void onRemovedRemotely(),
     });
 
     // Listeners are registered synchronously so Chrome can wake the worker for them.
@@ -59,8 +59,13 @@ function boot(): Promise<void> {
   booting ??= (async () => {
     const s = await getLocal();
     if (!s.accountId) await setLocal({ accountId: newAccountId() });
+    // Profiles set up before removal codes existed get one now; the relay
+    // learns its hash at the connect below.
+    if (s.botKey && !s.removalCode) await setLocal({ removalCode: newRemovalCode() });
+    // At every start, as Chrome keeps the uninstall URL only per install.
+    await applyUninstallUrl();
     // Reconnect check every minute. It also wakes a stopped worker.
-    if (!(await browser.alarms.get(RELAY_ALARM))) await browser.alarms.create(RELAY_ALARM, { periodInMinutes: 1 });
+    await ensureRelayAlarm();
     await connectRelay().catch(() => undefined);
     if (isConfigured(await getLocal())) await ensureWatchTab().catch((e) => console.warn('[watch] ensure failed', e));
   })().finally(() => (booting = null));
@@ -94,6 +99,7 @@ function onStorageChanged(changes: Record<string, Browser.storage.StorageChange>
     clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(() => void connectRelay(true).catch(() => undefined), 800);
   }
+  if (changes.botKey || changes.relayUrl || changes.accountId || changes.removalCode) void applyUninstallUrl();
   if (changes.chatId && changes.chatId.newValue && !changes.chatId.oldValue) void onLinked();
   // Confirm a new account name in Telegram (the "Linked" reply may have come
   // before the name was set, see linkedText).
@@ -178,7 +184,7 @@ async function handleMessage(msg: ContentToBackground | UiToBackground, sender: 
     case 'watch:reschedule':
       return scheduleReload();
     case 'profile:disconnect':
-      return disconnectProfile();
+      return { ...(await disconnectProfile()) };
     case 'diag:clear':
       return writeDiagnostics(() => []);
   }

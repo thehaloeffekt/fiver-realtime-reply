@@ -11,7 +11,7 @@ import { isConfigured, labelOf, type LocalState, type RecentAlert, type SessionS
 import { Badge, Dot, Logo, Spinner, Switch } from '../../ui/components';
 import { ask, useLocal, useNow, useSession } from '../../ui/hooks';
 import { AlertIcon, GearIcon, RefreshIcon } from '../../ui/icons';
-import { relayStatus, telegramStatus, topProblem, watchStatus } from '../../ui/status';
+import { relayStatus, removedNotice, telegramStatus, topProblem, watchStatus } from '../../ui/status';
 
 const openSettings = () => void browser.runtime.openOptionsPage();
 
@@ -63,6 +63,11 @@ function FirstRun({ local }: { local: LocalState }) {
   return (
     <div className="popup-body">
       <div className="card card-pad stack">
+        {removedNotice(local) && (
+          <div className="banner" role="status">
+            {removedNotice(local)}
+          </div>
+        )}
         <div>
           <div className="strong">Get Fiverr messages in Telegram</div>
           <div className="small muted">Setup takes about two minutes. Your bot token stays in this browser.</div>

@@ -3,6 +3,7 @@
  * The relay is not involved, so alerts keep working when it is down.
  */
 import { getLocal, updateSession } from '../lib/storage';
+import { splitTelegramHtml } from '../lib/split';
 import { TelegramError, answerCallbackQuery, sendMessage, type InlineKeyboard, type SentMessage } from '../lib/telegram';
 import { claim } from './relay';
 
@@ -40,6 +41,26 @@ export async function notify(html: string, opts: NotifyOptions = {}): Promise<Se
     void recordTelegram(false, err);
     throw err;
   }
+}
+
+/**
+ * Like notify, for text that may be over Telegram's 4,096-character limit:
+ * sends it as several messages, split at line breaks. The first part
+ * replies to `replyTo`; the buttons (and the claim) go on the last part.
+ */
+export async function notifyLong(html: string, opts: NotifyOptions = {}): Promise<SentMessage> {
+  const parts = splitTelegramHtml(html);
+  let last: SentMessage | undefined;
+  for (const [i, part] of parts.entries()) {
+    const isLast = i === parts.length - 1;
+    last = await notify(part, {
+      retries: opts.retries,
+      replyTo: i === 0 ? opts.replyTo : undefined,
+      keyboard: isLast ? opts.keyboard : undefined,
+      claim: isLast ? opts.claim : undefined,
+    });
+  }
+  return last!;
 }
 
 /** Sends to a chat id that is not saved yet (the "Linked" reply). */

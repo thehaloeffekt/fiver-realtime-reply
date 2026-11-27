@@ -1,11 +1,26 @@
 import { formatMineShort } from './buyerTime';
 import { encodeCallback } from './callback';
 import { INBOX_URL, MAX_BODY_CHARS, inboxUrlFor } from './constants';
+import { sliceSafe } from './split';
 import { escapeHtml, type InlineKeyboard } from './telegram';
 import type { Toast } from './toast';
 
+/** Cuts to `max` characters with "…", never in the middle of an emoji. */
 export function truncate(text: string, max = MAX_BODY_CHARS): string {
-  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+  return text.length <= max ? text : `${sliceSafe(text, max - 1)}…`;
+}
+
+/** Added where a buyer's message is cut. */
+export const CUT_NOTE = '… (message cut, open Fiverr for the rest)';
+
+/**
+ * A buyer's message, cut to `max` characters with CUT_NOTE when longer. The
+ * default (3,500) leaves room for the alert's other lines under Telegram's
+ * 4,096 limit, whatever the message holds.
+ */
+export function cutMessage(text: string, max = MAX_BODY_CHARS): string {
+  if (text.length <= max) return text;
+  return `${sliceSafe(text, max - CUT_NOTE.length).trimEnd()}${CUT_NOTE}`;
 }
 
 /**
@@ -22,7 +37,7 @@ export function formatAlert(label: string, toast: Pick<Toast, 'username' | 'disp
   const from = toast.username
     ? `Message from <b>${escapeHtml(toast.displayName)}</b> (@${escapeHtml(toast.username)})`
     : `Message from <b>${escapeHtml(toast.displayName)}</b>`;
-  const lines = [`<b>${escapeHtml(label)}</b>`, from, escapeHtml(truncate(bodyLine))];
+  const lines = [`<b>${escapeHtml(label)}</b>`, from, escapeHtml(cutMessage(bodyLine))];
   if (more > 0) lines.push(`<i>+${more} earlier ${more === 1 ? 'message' : 'messages'} in this conversation. Check Fiverr.</i>`);
   if (buyerTime) lines.push(`Buyer time: ${escapeHtml(buyerTime)}`);
   const html = lines.join('\n');

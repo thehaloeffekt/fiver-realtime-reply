@@ -12,14 +12,15 @@
 import { buyerNowLine, formatBuyerAt, formatMine, messageSentAt, type BuyerZone } from '../lib/buyerTime';
 import { decodeCallback, encodeCallback, isCallbackForMe } from '../lib/callback';
 import { INBOX_URL, inboxUrlFor } from '../lib/constants';
-import { formatTime, truncate } from '../lib/format';
+import { cutMessage, formatTime, truncate } from '../lib/format';
 import { lookupZone, myZone, zoneNote, zoneOffsetText, type MyZone } from '../lib/myZone';
 import type { ConversationMessage, InboxSnapshot, ListStatus } from '../lib/messages';
 import { getLocal, getSession, knownLabel, labelOf, patchSettings, setLocal, type LocalState, type PresenceAccount } from '../lib/storage';
+import { splitTelegramHtml } from '../lib/split';
 import { escapeHtml, setMyCommands, type BotCommand, type InlineKeyboard } from '../lib/telegram';
 import { saveBuyerZone, zoneFor } from './buyerZones';
-import { answerCallback, notify, sendTo } from './notify';
-import { isRelayOpen } from './relay';
+import { answerCallback, notify, notifyLong, sendTo } from './notify';
+import { isRelayOpen, sendForget } from './relay';
 import { reloadAndCompare } from './listSync';
 import { askTabOnce, readConversation } from './watchTab';
 
@@ -31,10 +32,12 @@ const USERNAME = /^[A-Za-z0-9_.-]{1,64}$/;
 export const BOT_COMMANDS: BotCommand[] = [
   { command: 'check', description: 'Check all accounts now. /check label: one account' },
   { command: 'full', description: 'Last messages from a buyer: /full username [label]' },
-  { command: 'status', description: 'Label, online state, unread count, last alert' },
+  { command: 'status', description: 'Label, online state, unread conversations, last alert' },
   { command: 'pause', description: 'Pause alerts. /pause label: one account' },
   { command: 'resume', description: 'Resume alerts. /resume label: one account' },
   { command: 'timezone', description: 'My time zone on all accounts: /timezone Africa/Lagos' },
+  { command: 'accounts', description: 'Every profile on this bot, online or offline' },
+  { command: 'remove', description: 'Remove a profile from this bot: /remove label' },
   { command: 'help', description: 'Commands and examples' },
 ];
 
@@ -169,6 +172,15 @@ async function runCommand(s: LocalState, command: string, args: string, replyTo?
     buyer = first.replace(/^@/, '');
     label = rest.join(' ');
   }
+  // /accounts and /remove are about the group, and their argument is not a
+  // "for this account" label: the leader alone answers them.
+  if (command === 'accounts' || command === 'remove') {
+    if (!(await isLeader(myId))) return;
+    const accounts = knownAccounts(s, presence);
+    if (command === 'accounts') return void (await notifyLong(accountsText(accounts, myId, myZone(s.settings)), { replyTo }));
+    return removeCommand(accounts, myId, args, replyTo);
+  }
+
   const target = resolveTarget(myLabel, myId, presence, label);
 
   // Group answers: from the leader only.
@@ -213,7 +225,7 @@ async function runCommand(s: LocalState, command: string, args: string, replyTo?
   }
 }
 
-const KNOWN = new Set(['check', 'status', 'pause', 'resume', 'full', 'timezone', 'help']);
+const KNOWN = new Set(['check', 'status', 'pause', 'resume', 'full', 'timezone', 'accounts', 'remove', 'help']);
 const FULL_USAGE = 'Usage: <code>/full username</code> or <code>/full username label</code>, for example <code>/full @some_buyer</code>.';
 
 /** The buyer has a row in this account's saved inbox list. */
@@ -229,10 +241,12 @@ export function helpText(labels: string[]): string {
     `/check ${escapeHtml(ex)}: only the account named ${escapeHtml(ex)}`,
     '/full some_buyer: the last messages from that buyer (each account that has the buyer answers)',
     `/full @some_buyer ${escapeHtml(ex)}: from that buyer on ${escapeHtml(ex)} only`,
-    '/status: label, online state, unread count and last alert of each account',
+    '/status: label, online state, unread conversations and last alert of each account',
     `/pause, /resume: stop or start alerts on all accounts; /pause ${escapeHtml(ex)}: one account`,
     '/timezone Africa/Lagos: show all times in that zone, on every account at once ("/timezone Lagos" works too)',
     '/timezone: the time zone each account uses now',
+    '/accounts: every profile on this bot, online or offline, with its account id',
+    '/remove label: remove that profile from this bot (or /remove account_id when two profiles have the same label)',
     '/help: this list',
     labels.length ? `Accounts: ${labels.map((l) => `<code>${escapeHtml(l)}</code>`).join(', ')}. Labels match without case.` : 'Labels match without case.',
     'Buttons under an alert work only while the relay is online.',
@@ -362,17 +376,21 @@ async function replyCheck(s: LocalState, replyTo?: number) {
  * marked as the Fiverr account's zone. Files are named, never sent.
  */
 export function formatConversation(messages: ConversationMessage[], zone: BuyerZone | null, timeZone: string, now = Date.now()): string {
-  if (!messages.length) return 'No messages from the buyer found.';
+  return conversationEntries(messages, zone, timeZone, now).join('\n');
+}
+
+/** formatConversation, one entry per buyer message (an entry keeps the message's own line breaks). */
+export function conversationEntries(messages: ConversationMessage[], zone: BuyerZone | null, timeZone: string, now = Date.now()): string[] {
+  if (!messages.length) return ['No messages from the buyer found.'];
   return messages
     .map((m) => {
-      const parts = [m.text ? escapeHtml(truncate(m.text, 600)) : '', ...m.files.map((f) => `[file: ${escapeHtml(truncate(f, 120))}]`)].filter(Boolean);
+      const parts = [m.text ? escapeHtml(cutMessage(m.text, FULL_TEXT_CHARS)) : '', ...m.files.map((f) => `[file: ${escapeHtml(truncate(f, 120))}]`)].filter(Boolean);
       const sentAt = messageSentAt(m.id);
       let when = '';
       if (sentAt !== null) when = formatMine(sentAt, timeZone) + (zone ? ` (buyer ${formatBuyerAt(sentAt, zone, now, timeZone)})` : '');
       else if (m.time) when = `${m.time} (Fiverr account time)`;
       return `${when ? `<i>${escapeHtml(when)}</i>: ` : ''}${parts.join(' ') || '(no text)'}`;
-    })
-    .join('\n');
+    });
 }
 
 /**
@@ -384,19 +402,33 @@ export function timesLine(mine: MyZone, zone: BuyerZone | null, now: number): st
   return zone ? `${times} ${buyerNowLine(zone, now, mine.zone)}` : times;
 }
 
-/** The whole "Full message" reply, kept under Telegram's 4096 limit by dropping the oldest lines. */
-export function fullReplyText(label: string, username: string, body: string, zone: BuyerZone | null, mine: MyZone, now = Date.now()): string {
+/** One buyer message in "Full message" is shown up to this length, then cut with CUT_NOTE. */
+export const FULL_TEXT_CHARS = 8000;
+/** "Full message" sends at most this many Telegram messages; the oldest buyer messages go first. */
+export const MAX_FULL_PARTS = 5;
+
+/**
+ * The whole "Full message" reply as one or more Telegram messages, each
+ * under the 4,096 limit (see splitTelegramHtml). Over MAX_FULL_PARTS, the
+ * oldest buyer messages are left out, and a line says how many.
+ */
+export function fullReplyParts(label: string, username: string, body: string | string[], zone: BuyerZone | null, mine: MyZone, now = Date.now()): string[] {
   const top = [`<b>${escapeHtml(label)}</b>: last messages from <b>@${escapeHtml(username)}</b>`, escapeHtml(timesLine(mine, zone, now))];
-  const header = top.join('\n');
-  const footer = '\n\n<i>Opening the conversation marked it as read on Fiverr.</i>';
-  // Drop whole lines, so an HTML tag is never cut.
-  const lines = body.split('\n');
-  while (lines.length > 1 && header.length + footer.length + lines.join('\n').length + 1 > 4000) lines.shift();
-  return `${header}\n${lines.join('\n')}${footer}`;
+  const footer = ['', '<i>Opening the conversation marked it as read on Fiverr.</i>'];
+  // Whole buyer messages are dropped, never part of one.
+  const lines = typeof body === 'string' ? [body] : [...body];
+  let dropped = 0;
+  for (;;) {
+    const note = dropped ? [`<i>${dropped} older ${dropped === 1 ? 'message' : 'messages'} left out. Open Fiverr for the rest.</i>`] : [];
+    const parts = splitTelegramHtml([...top, ...note, ...lines, ...footer].join('\n'));
+    if (parts.length <= MAX_FULL_PARTS || lines.length <= 1) return parts;
+    lines.shift();
+    dropped++;
+  }
 }
 
 async function replyFull(s: LocalState, username: string, replyTo?: number) {
-  let body: string;
+  let body: string | string[];
   let zone: BuyerZone | null = null;
   const mine = myZone(s.settings);
   try {
@@ -406,15 +438,19 @@ async function replyFull(s: LocalState, username: string, replyTo?: number) {
       // entry (it keeps a country seen earlier).
       await saveBuyerZone(res.value.header);
       zone = zoneFor(await getLocal(), username);
-      body = formatConversation(res.value.messages, zone, mine.zone);
+      body = conversationEntries(res.value.messages, zone, mine.zone);
     } else {
       body = missingNote('The conversation', 'is', res.missing, res.error);
     }
   } catch (err) {
     body = `Could not read the conversation. ${escapeHtml(String((err as Error).message ?? err))}`;
   }
-  const html = fullReplyText(labelOf(s), username, body, zone, mine);
-  await notify(html, { replyTo, keyboard: checkKeyboard(s.accountId!, { text: 'Open conversation', url: inboxUrlFor(username) }) });
+  const parts = fullReplyParts(labelOf(s), username, body, zone, mine);
+  const keyboard = checkKeyboard(s.accountId!, { text: 'Open conversation', url: inboxUrlFor(username) });
+  // Several parts: the first replies to the command, the buttons go on the last.
+  for (const [i, part] of parts.entries()) {
+    await notify(part, { replyTo: i === 0 ? replyTo : undefined, keyboard: i === parts.length - 1 ? keyboard : undefined });
+  }
 }
 
 /** The Unread chip count now (asks the watch tab), or the one from the last reload. */
@@ -432,9 +468,15 @@ export function seenText(ts: number | undefined, mine: MyZone, now = Date.now())
   return ts ? `${formatTime(ts, now, mine.zone)} (${zoneNote(mine)})` : 'never';
 }
 
-/** "<b>Main</b>: online, alerts on, 2 unread, last alert 6:52 PM (Africa/Lagos)" */
+/**
+ * "<b>Main</b>: online, alerts on, 2 unread conversations, last alert 6:52 PM (Africa/Lagos)".
+ * The number is Fiverr's "Unread" chip, which counts conversations, not messages.
+ */
 export function statusLine(label: string, alertsOn: boolean, unread: { n: number | null; live: boolean }, lastAlertAt: number | undefined, mine: MyZone, now = Date.now()): string {
-  const u = unread.n === null ? 'unread count unknown' : `${unread.n} unread${unread.live ? '' : ' (at the last reload)'}`;
+  const u =
+    unread.n === null
+      ? 'unread count unknown'
+      : `${unread.n} unread ${unread.n === 1 ? 'conversation' : 'conversations'}${unread.live ? '' : ' (at the last reload)'}`;
   return `<b>${escapeHtml(label)}</b>: online, alerts ${alertsOn ? 'on' : 'paused'}, ${u}, last alert ${escapeHtml(seenText(lastAlertAt, mine, now))}`;
 }
 
@@ -502,4 +544,91 @@ export async function handleOffline(accountId: string, label: string): Promise<v
   const s = await getLocal();
   if (!s.chatId || accountId === s.accountId) return;
   await notify(`<b>${escapeHtml(label || accountId)}</b> is offline. Open Chrome on that profile.`).catch(() => undefined);
+}
+
+/** Every account the relay knows (presence lists offline ones too), with this profile always in it. */
+export function knownAccounts(s: LocalState, presence: PresenceAccount[]): PresenceAccount[] {
+  const me: PresenceAccount = { accountId: s.accountId!, label: labelOf(s), online: true, lastSeen: Date.now() };
+  // My label from this profile's storage: the relay's copy may be older.
+  const others = presence.filter((a) => a.accountId !== me.accountId);
+  return [me, ...others].sort((a, b) => a.accountId.localeCompare(b.accountId));
+}
+
+/** /accounts: one line per profile, with its accountId for /remove. */
+export function accountsText(accounts: PresenceAccount[], myId: string, mine: MyZone, now = Date.now()): string {
+  const lines = [`<b>Accounts on this bot</b> (${accounts.length})`];
+  for (const a of accounts) {
+    const state = a.online ? 'online' : `offline, last seen ${escapeHtml(seenText(a.lastSeen, mine, now))}`;
+    const leader = a.accountId === myId ? ', answers commands' : '';
+    lines.push(`• <b>${escapeHtml(a.label || a.accountId)}</b>: ${state} (<code>${escapeHtml(a.accountId)}</code>${leader})`);
+  }
+  lines.push('Remove one with <code>/remove label</code>, or <code>/remove account_id</code> when two have the same label.');
+  return lines.join('\n');
+}
+
+export type Removal =
+  | { kind: 'usage' }
+  | { kind: 'unknown' }
+  | { kind: 'duplicate'; matches: PresenceAccount[] }
+  | { kind: 'self'; account: PresenceAccount }
+  | { kind: 'ok'; account: PresenceAccount };
+
+/** Which account "/remove {arg}" means. An exact accountId wins over a label. */
+export function resolveRemoval(accounts: PresenceAccount[], myId: string, arg: string): Removal {
+  const wanted = arg.trim();
+  if (!wanted) return { kind: 'usage' };
+  const byId = accounts.find((a) => a.accountId.toLowerCase() === wanted.toLowerCase());
+  const matches = byId ? [byId] : accounts.filter((a) => sameLabel(a.label, wanted));
+  if (matches.length === 0) return { kind: 'unknown' };
+  if (matches.length > 1) return { kind: 'duplicate', matches };
+  const account = matches[0]!;
+  return account.accountId === myId ? { kind: 'self', account } : { kind: 'ok', account };
+}
+
+/** Labels /remove accepts: every account but the leader. */
+function removableLabels(accounts: PresenceAccount[], myId: string): string {
+  const list = accounts.filter((a) => a.accountId !== myId).map((a) => `<code>${escapeHtml(a.label || a.accountId)}</code>`);
+  return list.length ? list.join(', ') : 'none (no other profile is on this bot)';
+}
+
+export function removeReplyText(r: Removal, arg: string, accounts: PresenceAccount[], myId: string): string | null {
+  switch (r.kind) {
+    case 'usage':
+      return `Usage: <code>/remove label</code>. Profiles you can remove: ${removableLabels(accounts, myId)}.`;
+    case 'unknown':
+      return `No account is named <b>${escapeHtml(arg)}</b>. Profiles you can remove: ${removableLabels(accounts, myId)}. Labels match without case.`;
+    case 'duplicate':
+      return `${r.matches.length} profiles are named <b>${escapeHtml(arg)}</b>: ${r.matches.map((a) => `<code>${escapeHtml(a.accountId)}</code>`).join(', ')}. Send /accounts to see which is which, then <code>/remove ${escapeHtml(r.matches[0]!.accountId)}</code> with the right account id.`;
+    case 'self':
+      return `<b>${escapeHtml(r.account.label || r.account.accountId)}</b> is the profile that answers commands, so it cannot remove itself from Telegram. On that profile, open the extension Settings and press <b>Disconnect this profile</b>.`;
+    case 'ok':
+      return null;
+  }
+}
+
+/**
+ * /remove: the leader asks the relay to forget the account. The relay then
+ * closes that profile (it clears itself) and sends "account_removed" to one
+ * online profile, whose notice is the confirmation in Telegram. An offline
+ * profile is refused by the relay when it next connects, and clears itself then.
+ */
+async function removeCommand(accounts: PresenceAccount[], myId: string, arg: string, replyTo?: number) {
+  const r = resolveRemoval(accounts, myId, arg);
+  const reply = removeReplyText(r, arg, accounts, myId);
+  if (reply) return void (await notify(reply, { replyTo }));
+  const account = (r as { account: PresenceAccount }).account;
+  if (!sendForget(account.accountId)) {
+    await notify(`The relay connection is down, so <b>${escapeHtml(account.label || account.accountId)}</b> was not removed. Try again in a minute.`, { replyTo });
+  }
+}
+
+export function accountRemovedText(label: string): string {
+  return `<b>${escapeHtml(label)}</b> was removed from this bot.`;
+}
+
+/** The relay removed another account (/remove, or that profile's uninstall URL): tell the user once. */
+export async function handleAccountRemoved(accountId: string, label: string): Promise<void> {
+  const s = await getLocal();
+  if (!s.chatId || !s.token || !accountId || accountId === s.accountId) return;
+  await notify(accountRemovedText(label || accountId)).catch(() => undefined);
 }

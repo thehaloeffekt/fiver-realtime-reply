@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { DEFAULT_RELAY_URL } from '../../lib/constants';
 import { formatAgo } from '../../lib/format';
 import { deriveRelayKeys } from '../../lib/keys';
@@ -18,7 +18,7 @@ import { TelegramError, getMe } from '../../lib/telegram';
 import { Badge, Logo, Spinner, Switch, type Tone } from '../../ui/components';
 import { ask, minutesUntil, useLocal, useNow, useSession } from '../../ui/hooks';
 import { CheckIcon } from '../../ui/icons';
-import { relayStatus } from '../../ui/status';
+import { relayStatus, removedNotice } from '../../ui/status';
 
 type Tab = 'setup' | 'settings';
 
@@ -40,6 +40,15 @@ export function Options() {
     setTab(t);
     history.replaceState(null, '', `#${t}`);
   };
+
+  // Disconnected here, or removed from somewhere else: back to the first step.
+  const wasConfigured = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (!local) return;
+    const now = isConfigured(local);
+    if (wasConfigured.current && !now) choose('setup');
+    wasConfigured.current = now;
+  }, [local]);
 
   if (!local || !session) return null;
   return (
@@ -101,8 +110,14 @@ function Setup({ local, session }: { local: LocalState; session: SessionState })
   const s3: StepState = !local.webhookUrl ? LOCKED : step3Done ? DONE : waiting ? { tone: 'accent', text: 'Waiting for /start' } : TODO;
   const s4: StepState = !step3Done ? LOCKED : local.label ? DONE : TODO;
 
+  const removed = removedNotice(local);
   return (
     <div className="stack">
+      {removed && (
+        <div className="banner" role="status">
+          {removed}
+        </div>
+      )}
       <StepCard n={1} title="Connect your bot" state={step1Done ? DONE : TODO}>
         <TokenStep local={local} />
       </StepCard>
@@ -139,7 +154,8 @@ function TokenStep({ local }: { local: LocalState }) {
       const bot = await getMe(value);
       const keys = await deriveRelayKeys(value);
       const changed = value !== local.token;
-      await setLocal({ token: value, bot: { id: bot.id, username: bot.username, firstName: bot.first_name }, ...keys });
+      // removedAt: a new setup ends the "removed from the bot" notice.
+      await setLocal({ token: value, bot: { id: bot.id, username: bot.username, firstName: bot.first_name }, ...keys, removedAt: undefined });
       // A new bot means a new chat and a new webhook.
       if (changed) await removeLocal(['chatId', 'webhookUrl', 'linkWaitUntil', 'lastUnread', 'pendingClaims']);
     } catch (e) {
@@ -476,14 +492,20 @@ function ReloadInterval({ settings, nextReloadAt, now }: { settings: Settings; n
 
 function Connection({ local, session, now }: { local: LocalState; session: SessionState; now: number }) {
   const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const relay = relayStatus(local, session, now);
   const others = session.presence.filter((a) => a.accountId !== local.accountId);
+  const last = others.length === 0 && session.presence.length > 0;
 
   const disconnect = async () => {
-    if (!confirm('Disconnect this profile? It forgets the bot token and the chat. Other profiles on the same bot keep working.')) return;
     setBusy(true);
-    await ask({ type: 'profile:disconnect' });
+    setError(null);
+    const res = await ask({ type: 'profile:disconnect' });
     setBusy(false);
+    setConfirming(false);
+    // On success storage is empty now, and Options switches to the first setup step.
+    if (!res.ok) setError(res.error ?? 'Could not disconnect.');
   };
 
   const rows: Array<[string, ReactNode]> = [
@@ -507,12 +529,33 @@ function Connection({ local, session, now }: { local: LocalState; session: Sessi
           </div>
         ))}
       </dl>
-      <div className="row" style={{ marginTop: 12 }}>
-        <button className="btn btn-danger" onClick={disconnect} disabled={busy || !local.token}>
-          {busy ? <Spinner /> : 'Disconnect this profile'}
-        </button>
-        <span className="small muted">The webhook stays, so other profiles on this bot keep working.</span>
-      </div>
+      {!confirming ? (
+        <div className="row" style={{ marginTop: 12 }}>
+          <button className="btn btn-danger" onClick={() => setConfirming(true)} disabled={busy || !local.token}>
+            Disconnect this profile
+          </button>
+          <span className="small muted">Removes this profile from the bot. Other profiles on this bot keep working.</span>
+        </div>
+      ) : (
+        <div className="stack" style={{ marginTop: 12 }}>
+          <div className="banner banner-err" role="alert">
+            <div>
+              <b>Disconnect {labelOf(local)}?</b> Telegram gets a notice, the relay forgets this profile, the watch tab closes and
+              this extension forgets the bot token, the chat and every setting on this profile.
+              {last ? ' This is the last profile on the bot, so the bot webhook is removed too.' : ''} You can set it up again later.
+            </div>
+          </div>
+          <div className="row">
+            <button className="btn btn-danger" onClick={disconnect} disabled={busy}>
+              {busy ? <Spinner /> : 'Yes, disconnect'}
+            </button>
+            <button className="btn" onClick={() => setConfirming(false)} disabled={busy}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+      {error && <div className="error-text">{error}</div>}
     </section>
   );
 }

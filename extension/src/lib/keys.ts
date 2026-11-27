@@ -18,6 +18,25 @@ export function newAccountId(): string {
   return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join('');
 }
 
+/** 32 random bytes as hex: the removal code. */
+export function newRemovalCode(): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(32)), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** Chrome refuses a longer uninstall URL (older versions, before 2023, allowed 255; ours fits either way with the default relay). */
+export const MAX_UNINSTALL_URL_CHARS = 1023;
+
+/**
+ * The page Chrome opens after an uninstall: GET /bye on the relay. It holds
+ * the botKey, the accountId and the removal code, which together can remove
+ * this one account and nothing else. Never the bot token or the secret: this
+ * URL ends up in browser history. Null when it would be too long for Chrome.
+ */
+export function uninstallUrl(relayUrl: string, botKey: string, accountId: string, removalCode: string): string | null {
+  const url = `${relayUrl.trim().replace(/\/+$/, '')}/bye/${botKey}?accountId=${encodeURIComponent(accountId)}&code=${encodeURIComponent(removalCode)}`;
+  return url.length <= MAX_UNINSTALL_URL_CHARS ? url : null;
+}
+
 /** https://host/path → wss://host/path (http → ws). Trailing slashes removed. */
 export function relayWsBase(relayUrl: string): string {
   return relayUrl.trim().replace(/\/+$/, '').replace(/^http(s?):\/\//i, (_, s) => `ws${s}://`);

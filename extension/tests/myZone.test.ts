@@ -11,7 +11,7 @@
  * Names and texts are made up; the times are the ones from the bug report.
  */
 import { afterAll, describe, expect, it } from 'vitest';
-import { fullReplyText, formatConversation, seenText, statusLine, timesLine, zoneStatusText } from '../src/background/commands';
+import { fullReplyParts, formatConversation, seenText, statusLine, timesLine, zoneStatusText } from '../src/background/commands';
 import { readBuyerHeader } from '../src/content/reader';
 import { formatBuyerAt, offsetFromClock, parseClock, type BuyerZone } from '../src/lib/buyerTime';
 import { formatDiagnosticsLog, logTime, type DiagEntry } from '../src/lib/diagnostics';
@@ -76,7 +76,7 @@ describe('Full message uses the selected zone, not the browser zone', () => {
   it('the report: 6:52 PM my time, 5:52 PM the buyer, with the zone on top', () => {
     const body = formatConversation([msg], UK, LAGOS.zone, NOW);
     expect(body).toBe('<i>Nov 16, 6:52 PM (buyer 5:52 PM)</i>: hello');
-    expect(fullReplyText('Main', 'some_buyer', body, UK, LAGOS, NOW).split('\n').slice(0, 3)).toEqual([
+    expect(fullReplyParts('Main', 'some_buyer', body, UK, LAGOS, NOW)[0]!.split('\n').slice(0, 3)).toEqual([
       '<b>Main</b>: last messages from <b>@some_buyer</b>',
       'Times: Africa/Lagos. Buyer local time now: 6:07 PM (UTC+0, United Kingdom)',
       '<i>Nov 16, 6:52 PM (buyer 5:52 PM)</i>: hello',
@@ -145,7 +145,7 @@ describe('every other time shown to me uses the same setting', () => {
     expect(seenText(SENT, LAGOS, NOW)).toBe('6:52 PM (Africa/Lagos)');
     expect(seenText(SENT, UNSET, NOW)).toBe('12:52 PM (America/Bogota, browser zone, not set)');
     expect(seenText(undefined, LAGOS, NOW)).toBe('never');
-    expect(statusLine('Main', true, { n: 2, live: true }, SENT, LAGOS, NOW)).toBe('<b>Main</b>: online, alerts on, 2 unread, last alert 6:52 PM (Africa/Lagos)');
+    expect(statusLine('Main', true, { n: 2, live: true }, SENT, LAGOS, NOW)).toBe('<b>Main</b>: online, alerts on, 2 unread conversations, last alert 6:52 PM (Africa/Lagos)');
   });
 
   it('/timezone without a zone: the zone and its clock now', () => {

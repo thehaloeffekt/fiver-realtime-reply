@@ -22,10 +22,15 @@ vi.mock('../src/lib/storage', async (orig) => {
 });
 vi.mock('../src/background/notify', () => ({
   notify: vi.fn(async (html: string, opts?: object) => void sent.push({ html, opts: opts as never })),
+  notifyLong: vi.fn(async (html: string, opts?: object) => void sent.push({ html, opts: opts as never })),
   sendTo: vi.fn(async () => undefined),
   answerCallback: vi.fn(async () => undefined),
 }));
-vi.mock('../src/background/relay', () => ({ isRelayOpen: () => true }));
+const relay = vi.hoisted(() => ({ forgets: [] as string[], open: true }));
+vi.mock('../src/background/relay', () => ({
+  isRelayOpen: () => relay.open,
+  sendForget: (accountId: string) => (relay.open ? (relay.forgets.push(accountId), true) : false),
+}));
 vi.mock('../src/background/listSync', () => ({
   reloadAndCompare: vi.fn(async () => ({ page: '1', unread: { ok: true, value: 1 }, rows: { ok: true, value: [{ username: 'some_buyer', name: 'Some Buyer', unread: 1, time: '', mine: false, typing: false, preview: 'hi' }] } })),
 }));
@@ -38,7 +43,7 @@ vi.mock('../src/background/watchTab', () => ({
   readConversation: vi.fn(async () => watch.conversation),
 }));
 
-const { BOT_COMMANDS, handleUpdate, helpText, parseCommand, pauseText, registerCommands, resolveTarget, unknownLabelText, validLabels } = await import('../src/background/commands');
+const { BOT_COMMANDS, handleAccountRemoved, handleUpdate, helpText, parseCommand, pauseText, registerCommands, resolveTarget, unknownLabelText, validLabels } = await import('../src/background/commands');
 const { DEFAULT_SETTINGS } = await import('../src/lib/storage');
 const { readConversation } = await import('../src/background/watchTab');
 
@@ -77,6 +82,8 @@ const asMain = (accounts = BOTH, extra?: Partial<LocalState>) => setup({ id: 'ac
 const asSecond = (accounts = BOTH, extra?: Partial<LocalState>) => setup({ id: 'acc-b', label: 'Second' }, accounts, extra);
 
 beforeEach(() => {
+  relay.forgets.length = 0;
+  relay.open = true;
   watch.conversation = null;
   watch.unread = 3;
   vi.mocked(readConversation).mockClear();
@@ -100,7 +107,7 @@ describe('parsing and labels', () => {
   });
 
   it('the "/" menu list is valid for Telegram', () => {
-    expect(BOT_COMMANDS.map((c) => c.command)).toEqual(['check', 'full', 'status', 'pause', 'resume', 'timezone', 'help']);
+    expect(BOT_COMMANDS.map((c) => c.command)).toEqual(['check', 'full', 'status', 'pause', 'resume', 'timezone', 'accounts', 'remove', 'help']);
     for (const c of BOT_COMMANDS) {
       expect(c.command).toMatch(/^[a-z0-9_]{1,32}$/);
       expect(c.description.length).toBeGreaterThan(2);
@@ -160,6 +167,19 @@ describe('/check', () => {
 });
 
 describe('/full', () => {
+  it('a very long conversation goes out as several messages: reply on the first, buttons on the last', async () => {
+    asMain();
+    const long = 'some long made-up text & more '.repeat(260); // ~7,800 characters
+    watch.conversation = { ok: true, value: { messages: [{ id: 'x', time: '', text: long, files: [] }], header: null } };
+    await say('/full some_buyer');
+    expect(sent.length).toBeGreaterThan(1);
+    expect(sent[0]!.opts?.replyTo).toBe(9);
+    expect(sent.slice(1).every((m) => m.opts?.replyTo === undefined)).toBe(true);
+    expect(sent.slice(0, -1).every((m) => m.opts?.keyboard === undefined)).toBe(true);
+    expect(sent.at(-1)!.opts?.keyboard?.[0]?.[0]).toMatchObject({ text: 'Open conversation' });
+    for (const m of sent) expect(m.html.replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').length).toBeLessThanOrEqual(4096);
+  });
+
   const zone: BuyerZone = { offset: 0, at: Date.now() };
   const read = (offset = 0) => ({
     ok: true,
@@ -219,7 +239,12 @@ describe('/status', () => {
   it('each account: label, online, alerts state, live unread count, last alert', async () => {
     asSecond();
     await say('/status');
-    expect(sent[0]!.html).toBe('<b>Second</b>: online, alerts on, 3 unread, last alert never');
+    // The Unread chip counts conversations, so the text says conversations, not messages.
+    expect(sent[0]!.html).toBe('<b>Second</b>: online, alerts on, 3 unread conversations, last alert never');
+    watch.unread = 1;
+    sent.length = 0;
+    await say('/status');
+    expect(sent[0]!.html).toBe('<b>Second</b>: online, alerts on, 1 unread conversation, last alert never');
   });
 
   it('falls back to the count from the last reload; the leader lists offline accounts', async () => {
@@ -227,7 +252,7 @@ describe('/status', () => {
     asMain(presence(['acc-a', 'Main', true], ['acc-c', 'Third', false]), { lastUnread: 2 });
     await say('/status');
     const lines = sent[0]!.html.split('\n');
-    expect(lines[0]).toBe('<b>Main</b>: online, alerts on, 2 unread (at the last reload), last alert never');
+    expect(lines[0]).toBe('<b>Main</b>: online, alerts on, 2 unread conversations (at the last reload), last alert never');
     expect(lines[1]).toMatch(/^<b>Third<\/b>: offline since /);
   });
 });
@@ -344,5 +369,108 @@ describe('buttons', () => {
     watch.conversation = { ok: true, value: { messages: [], header: null } };
     await press('c|acc-a|full|some_buyer');
     expect(sent[0]!.opts?.keyboard?.[0]!.map((b) => b.text)).toEqual(['Open conversation', 'Check now']);
+  });
+});
+
+describe('/accounts', () => {
+  const THREE = presence(['acc-a', 'Main', true], ['acc-b', 'Second', true], ['acc-c', 'Spare Shop', false]);
+
+  it('the leader lists every profile with its label, online or offline, and its account id', async () => {
+    asMain(THREE);
+    await say('/accounts');
+    expect(sent).toHaveLength(1);
+    const lines = sent[0]!.html.split('\n');
+    expect(lines[0]).toBe('<b>Accounts on this bot</b> (3)');
+    expect(lines[1]).toBe('• <b>Main</b>: online (<code>acc-a</code>, answers commands)');
+    expect(lines[2]).toBe('• <b>Second</b>: online (<code>acc-b</code>)');
+    expect(lines[3]).toMatch(/^• <b>Spare Shop<\/b>: offline, last seen .+ \(<code>acc-c<\/code>\)$/);
+  });
+
+  it('only the leader answers, so the user gets one reply', async () => {
+    asSecond(THREE);
+    await say('/accounts');
+    expect(sent).toHaveLength(0);
+  });
+});
+
+describe('/remove', () => {
+  const THREE = presence(['acc-a', 'Main', true], ['acc-b', 'Second', true], ['acc-c', 'Spare Shop', false]);
+
+  it('a valid label: the leader sends the forget frame for that account (offline ones too)', async () => {
+    asMain(THREE);
+    await say('/remove spare  shop');
+    expect(relay.forgets).toEqual(['acc-c']);
+    // The confirmation comes from the relay's account_removed notice, not here.
+    expect(sent).toHaveLength(0);
+    await say('/remove Second');
+    expect(relay.forgets).toEqual(['acc-c', 'acc-b']);
+  });
+
+  it('only the leader acts on it', async () => {
+    asSecond(THREE);
+    await say('/remove Spare Shop');
+    expect(relay.forgets).toEqual([]);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('an unknown label is refused and the valid labels are shown', async () => {
+    asMain(THREE);
+    await say('/remove Nope');
+    expect(relay.forgets).toEqual([]);
+    expect(sent[0]!.html).toBe('No account is named <b>Nope</b>. Profiles you can remove: <code>Second</code>, <code>Spare Shop</code>. Labels match without case.');
+  });
+
+  it('two profiles with the same label: asks for the account id, which then works', async () => {
+    asMain(presence(['acc-a', 'Main', true], ['acc-b', 'Shop', true], ['acc-c', 'shop', false]));
+    await say('/remove Shop');
+    expect(relay.forgets).toEqual([]);
+    expect(sent[0]!.html).toContain('2 profiles are named <b>Shop</b>: <code>acc-b</code>, <code>acc-c</code>.');
+    expect(sent[0]!.html).toContain('/accounts');
+    await say('/remove acc-c');
+    expect(relay.forgets).toEqual(['acc-c']);
+  });
+
+  it("the leader's own label is refused: use Settings on that profile", async () => {
+    asMain(THREE);
+    await say('/remove main');
+    await say('/remove acc-a');
+    expect(relay.forgets).toEqual([]);
+    expect(sent).toHaveLength(2);
+    for (const m of sent) {
+      expect(m.html).toContain('<b>Main</b> is the profile that answers commands, so it cannot remove itself from Telegram.');
+      expect(m.html).toContain('Disconnect this profile');
+    }
+  });
+
+  it('no label: usage; relay down: says it was not removed', async () => {
+    asMain(THREE);
+    await say('/remove');
+    expect(sent[0]!.html).toMatch(/^Usage: <code>\/remove label<\/code>/);
+    relay.open = false;
+    await say('/remove Second');
+    expect(sent[1]!.html).toContain('was not removed');
+  });
+
+  it('/help lists /accounts and /remove', async () => {
+    asMain(THREE);
+    await say('/help');
+    expect(sent[0]!.html).toContain('/accounts:');
+    expect(sent[0]!.html).toContain('/remove label:');
+  });
+});
+
+describe('account_removed from the relay', () => {
+  it('sends one notice: "{label} was removed from this bot."', async () => {
+    asMain();
+    await handleAccountRemoved('acc-z', 'Old <Shop>');
+    expect(sent.map((m) => m.html)).toEqual(['<b>Old &lt;Shop&gt;</b> was removed from this bot.']);
+  });
+
+  it('ignores a notice about itself, and needs a linked chat', async () => {
+    asMain();
+    await handleAccountRemoved('acc-a', 'Main');
+    asMain(BOTH, { chatId: undefined });
+    await handleAccountRemoved('acc-z', 'Old');
+    expect(sent).toHaveLength(0);
   });
 });

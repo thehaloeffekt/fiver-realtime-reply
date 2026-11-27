@@ -28,6 +28,22 @@ export const HOOK_RATE_LIMIT = 60;
 export const HOOK_RATE_WINDOW_MS = 60_000;
 /** At most one "offline" notice per account in this period. */
 export const OFFLINE_NOTICE_INTERVAL_MS = 5 * 60_000;
+/**
+ * A removed accountId may not authenticate again for this long, so an old
+ * copy of the extension (a restored profile, a second install) cannot come
+ * back without notice. A new setup makes a new accountId, so it is not affected.
+ */
+export const REMOVED_TTL_MS = 90 * 24 * 60 * 60_000;
+/**
+ * Relay notices ("account_removed") that found no online profile wait this
+ * long for the next one to connect. They hold an account label, never a
+ * Telegram update, so the 5-minute rule for updates does not apply to them.
+ */
+export const NOTICE_TTL_MS = 30 * 24 * 60 * 60_000;
+export const MAX_QUEUED_NOTICES = 20;
+/** GET /bye calls per bot in any rolling minute (match or not). */
+export const BYE_RATE_LIMIT = 10;
+export const BYE_RATE_WINDOW_MS = 60_000;
 const HOUSEKEEPING_INTERVAL_MS = 60_000;
 
 export const CLOSE = {
@@ -35,6 +51,7 @@ export const CLOSE = {
 	AUTH_FAILED: 4003,
 	AUTH_TIMEOUT: 4008,
 	REPLACED: 4009,
+	REMOVED: 4010,
 	BAD_MESSAGE: 4400,
 	TOO_MANY: 4429,
 } as const;
@@ -91,6 +108,10 @@ export class RelayHub extends DurableObject<Env> {
 			CREATE TABLE IF NOT EXISTS seen (update_id INTEGER PRIMARY KEY, at INTEGER NOT NULL);
 			CREATE TABLE IF NOT EXISTS hook_hits (at INTEGER NOT NULL);
 			CREATE TABLE IF NOT EXISTS offline_notices (account_id TEXT PRIMARY KEY, at INTEGER NOT NULL);
+			CREATE TABLE IF NOT EXISTS removal_codes (account_id TEXT PRIMARY KEY, code_hash TEXT NOT NULL);
+			CREATE TABLE IF NOT EXISTS removed (account_id TEXT PRIMARY KEY, at INTEGER NOT NULL);
+			CREATE TABLE IF NOT EXISTS notices (id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT NOT NULL, created_at INTEGER NOT NULL);
+			CREATE TABLE IF NOT EXISTS bye_hits (at INTEGER NOT NULL);
 		`);
 		// The extension sends the text "ping" every 20 s. The runtime answers
 		// "pong" itself, so a hibernated object stays asleep. Only one pair can be
@@ -278,6 +299,8 @@ export class RelayHub extends DurableObject<Env> {
 				return this.handleClaim(ws, state, msg, now);
 			case "ack":
 				return this.handleAck(ws, state, msg);
+			case "forget":
+				return this.handleForget(ws, state, msg, now);
 			case "ping":
 				safeSend(ws, '{"type":"pong"}');
 				return;
@@ -305,6 +328,13 @@ export class RelayHub extends DurableObject<Env> {
 		if (!(await this.checkSecret(msg.secret, true))) return safeClose(ws, CLOSE.AUTH_FAILED, "auth failed");
 		if (ws.readyState !== WebSocket.OPEN) return;
 
+		// A removed account stays out (see REMOVED_TTL_MS). Checked only after
+		// the secret, so a stranger cannot learn which accountIds were removed.
+		if (this.isRemoved(state.accountId, now)) {
+			safeSend(ws, '{"type":"removed"}');
+			return safeClose(ws, CLOSE.REMOVED, "account removed");
+		}
+
 		const label = cleanLabel(msg.label);
 		state.authed = true;
 		ws.serializeAttachment(state);
@@ -315,6 +345,15 @@ export class RelayHub extends DurableObject<Env> {
 			label,
 			now,
 		);
+		// Optional, so older extensions still connect. Only the hash is kept:
+		// GET /bye proves knowledge of the code without the relay storing it.
+		if (typeof msg.removalCodeHash === "string" && HEX64.test(msg.removalCodeHash)) {
+			this.sql.exec(
+				"INSERT OR REPLACE INTO removal_codes (account_id, code_hash) VALUES (?, ?)",
+				state.accountId,
+				msg.removalCodeHash,
+			);
+		}
 
 		// One live connection per account: a reloaded extension replaces the old socket.
 		for (const other of this.ctx.getWebSockets(tagOf(state.accountId))) {
@@ -343,7 +382,104 @@ export class RelayHub extends DurableObject<Env> {
 			.toArray();
 		for (const row of rows) safeSend(ws, updateFrame(row.update_id, row.target !== BROADCAST, row.body));
 
+		// Relay notices that found no online profile when they were made.
+		const notices = this.sql.exec<{ id: number; body: string }>("SELECT id, body FROM notices ORDER BY id").toArray();
+		for (const n of notices) safeSend(ws, n.body);
+		if (notices.length) this.sql.exec("DELETE FROM notices WHERE id <= ?", notices[notices.length - 1]!.id);
+
 		this.broadcastPresence();
+	}
+
+	private isRemoved(accountId: string, now: number): boolean {
+		return this.sql.exec("SELECT 1 FROM removed WHERE account_id = ? AND at > ?", accountId, now - REMOVED_TTL_MS).toArray().length > 0;
+	}
+
+	/**
+	 * {"type":"forget","accountId"}: any authenticated profile of this bot may
+	 * remove any account of it (Settings removes itself, /remove removes
+	 * another). Everyone on the bot shares the token, so they are equally trusted.
+	 */
+	private handleForget(ws: WebSocket, state: SocketState, msg: Record<string, unknown>, now: number) {
+		const accountId = msg.accountId;
+		if (typeof accountId !== "string" || !ACCOUNT_ID.test(accountId)) return sendError(ws, "bad_forget");
+		const known =
+			this.sql.exec("SELECT 1 FROM accounts WHERE account_id = ?", accountId).toArray().length > 0 ||
+			this.sql.exec("SELECT 1 FROM removal_codes WHERE account_id = ?", accountId).toArray().length > 0;
+		if (!known) return sendError(ws, "unknown_account", accountId);
+		return this.forgetAccount(accountId, state.accountId, now);
+	}
+
+	/**
+	 * Removes everything the relay knows about one account, keeps it out for
+	 * REMOVED_TTL_MS, closes its sockets and tells one other profile.
+	 *
+	 * @param requester the account that asked (forget frame), or null for GET /bye.
+	 *   An account that removes itself (Settings) has already told the user in
+	 *   Telegram, so no "account_removed" is sent then: one message, not two.
+	 */
+	private async forgetAccount(accountId: string, requester: string | null, now: number) {
+		const label =
+			this.sql.exec<{ label: string }>("SELECT label FROM accounts WHERE account_id = ?", accountId).toArray()[0]?.label ?? "";
+		this.sql.exec("DELETE FROM accounts WHERE account_id = ?", accountId);
+		this.sql.exec("DELETE FROM routes WHERE account_id = ?", accountId);
+		this.sql.exec("DELETE FROM pending WHERE target = ?", accountId);
+		this.sql.exec("DELETE FROM removal_codes WHERE account_id = ?", accountId);
+		this.sql.exec("DELETE FROM offline_notices WHERE account_id = ?", accountId);
+		this.sql.exec("INSERT OR REPLACE INTO removed (account_id, at) VALUES (?, ?)", accountId, now);
+
+		for (const ws of this.ctx.getWebSockets(tagOf(accountId))) {
+			safeSend(ws, '{"type":"removed"}');
+			safeClose(ws, CLOSE.REMOVED, "account removed");
+		}
+
+		if (requester !== accountId) {
+			const notice = JSON.stringify({ type: "account_removed", accountId, label });
+			const messenger = this.authedSockets().find((ws) => stateOf(ws)!.accountId !== accountId);
+			if (messenger) safeSend(messenger, notice);
+			else this.queueNotice(notice, now);
+		}
+
+		this.broadcastPresence();
+		await this.scheduleAlarm(now + NOTICE_TTL_MS);
+	}
+
+	private queueNotice(body: string, now: number) {
+		this.sql.exec("INSERT INTO notices (body, created_at) VALUES (?, ?)", body, now);
+		const count = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM notices").one().n;
+		if (count > MAX_QUEUED_NOTICES) {
+			this.sql.exec("DELETE FROM notices WHERE id IN (SELECT id FROM notices ORDER BY id LIMIT ?)", count - MAX_QUEUED_NOTICES);
+		}
+	}
+
+	// ------------------------------------------------------------------- bye
+
+	/**
+	 * GET /bye/:botKey?accountId=…&code=… (the extension's uninstall URL).
+	 * Removes the account when SHA-256(code) equals the hash it sent at auth.
+	 * The Worker shows the same page whatever the result, so the only answer
+	 * that differs is 429 from the rate limit, which says nothing about the code.
+	 */
+	async handleBye(accountId: string, code: string): Promise<number> {
+		const now = Date.now();
+		this.housekeeping(now);
+		if (!this.takeByeSlot(now)) return 429;
+		// Hash and compare even for malformed input, so every path costs about the same.
+		const hash = await sha256(code);
+		const validInput = ACCOUNT_ID.test(accountId) && HEX64.test(code);
+		const stored = validInput
+			? this.sql.exec<{ code_hash: string }>("SELECT code_hash FROM removal_codes WHERE account_id = ?", accountId).toArray()[0]?.code_hash
+			: undefined;
+		const equal = timingSafeEqual(hash, stored ? fromHex(stored) : new Uint8Array(32));
+		if (validInput && stored && equal) await this.forgetAccount(accountId, null, now);
+		return 200;
+	}
+
+	private takeByeSlot(now: number): boolean {
+		this.sql.exec("DELETE FROM bye_hits WHERE at <= ?", now - BYE_RATE_WINDOW_MS);
+		const used = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM bye_hits").one().n;
+		if (used >= BYE_RATE_LIMIT) return false;
+		this.sql.exec("INSERT INTO bye_hits (at) VALUES (?)", now);
+		return true;
 	}
 
 	private async handleClaim(ws: WebSocket, state: SocketState, msg: Record<string, unknown>, now: number) {
@@ -441,6 +577,9 @@ export class RelayHub extends DurableObject<Env> {
 		this.sql.exec("DELETE FROM routes WHERE created_at <= ?", now - ROUTE_TTL_MS);
 		this.sql.exec("DELETE FROM hook_hits WHERE at <= ?", now - HOOK_RATE_WINDOW_MS);
 		this.sql.exec("DELETE FROM offline_notices WHERE at <= ?", now - OFFLINE_NOTICE_INTERVAL_MS);
+		this.sql.exec("DELETE FROM removed WHERE at <= ?", now - REMOVED_TTL_MS);
+		this.sql.exec("DELETE FROM notices WHERE created_at <= ?", now - NOTICE_TTL_MS);
+		this.sql.exec("DELETE FROM bye_hits WHERE at <= ?", now - BYE_RATE_WINDOW_MS);
 		const count = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM routes").one().n;
 		if (count > MAX_ROUTES) {
 			this.sql.exec(
@@ -468,6 +607,8 @@ export class RelayHub extends DurableObject<Env> {
 			["SELECT MIN(received_at) AS t FROM pending", UPDATE_TTL_MS],
 			["SELECT MIN(created_at) AS t FROM routes", ROUTE_TTL_MS],
 			["SELECT MIN(at) AS t FROM seen", SEEN_TTL_MS],
+			["SELECT MIN(at) AS t FROM removed", REMOVED_TTL_MS],
+			["SELECT MIN(created_at) AS t FROM notices", NOTICE_TTL_MS],
 		];
 		for (const [query, ttl] of expiries) {
 			const oldest = this.sql.exec<{ t: number | null }>(query).one().t;

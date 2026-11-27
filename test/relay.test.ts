@@ -2,9 +2,11 @@ import { env, evictDurableObject, runDurableObjectAlarm, runInDurableObject, SEL
 import { describe, expect, it } from "vitest";
 import {
 	AUTH_TIMEOUT_MS,
+	BYE_RATE_LIMIT,
 	CLOSE,
 	HOOK_RATE_LIMIT,
 	MAX_QUEUED_UPDATES,
+	REMOVED_TTL_MS,
 	ROUTE_TTL_MS,
 	UPDATE_HARD_LIMIT_MS,
 	UPDATE_TTL_MS,
@@ -71,9 +73,9 @@ async function open(botKey: string, accountId: string): Promise<Client> {
 	};
 }
 
-async function connect(bot: { botKey: string; secret: string }, accountId: string, label = accountId) {
+async function connect(bot: { botKey: string; secret: string }, accountId: string, label = accountId, extra: Frame = {}) {
 	const c = await open(bot.botKey, accountId);
-	c.send({ type: "auth", secret: bot.secret, accountId, label });
+	c.send({ type: "auth", secret: bot.secret, accountId, label, ...extra });
 	const ready = await c.next("ready");
 	return { ...c, ready };
 }
@@ -548,5 +550,229 @@ describe("retention", () => {
 		expect(left.routes).toEqual(["2"]);
 		// The next alarm is set for the remaining claim.
 		expect(await left.alarm).not.toBeNull();
+	});
+});
+
+describe("removal", () => {
+	const CHAT = 555;
+	const CODE = "c0de".repeat(16);
+	const bye = (botKey: string, accountId: string, code: string) =>
+		SELF.fetch(`${BASE}/bye/${botKey}?accountId=${encodeURIComponent(accountId)}&code=${encodeURIComponent(code)}`);
+	const PAGE_TEXT = "This profile was disconnected. You can close this tab.";
+
+	/** Rows left for one account in every table that holds per-account data. */
+	const leftovers = (botKey: string, accountId: string) =>
+		runInDurableObject(stubFor(botKey), (_i, state) => {
+			const n = (q: string, ...p: unknown[]) => state.storage.sql.exec<{ n: number }>(q, ...p).one().n;
+			return {
+				accounts: n("SELECT COUNT(*) AS n FROM accounts WHERE account_id = ?", accountId),
+				routes: n("SELECT COUNT(*) AS n FROM routes WHERE account_id = ?", accountId),
+				pending: n("SELECT COUNT(*) AS n FROM pending WHERE target = ?", accountId),
+				codes: n("SELECT COUNT(*) AS n FROM removal_codes WHERE account_id = ?", accountId),
+				removed: n("SELECT COUNT(*) AS n FROM removed WHERE account_id = ?", accountId),
+			};
+		});
+
+	/** bob: one claim, one queued update for him, and a removal code. Returns the sockets. */
+	async function threeProfiles() {
+		const bot = await newBot();
+		const a = await connect(bot, "alice", "Alice");
+		const b = await connect(bot, "bob", "Bob", { removalCodeHash: await hex(CODE) });
+		b.send({ type: "claim", chatId: CHAT, messageId: 900 });
+		await pause();
+		return { bot, a, b };
+	}
+
+	it("stores only the hash of the removal code, sent at auth", async () => {
+		const { bot, a, b } = await threeProfiles();
+		const stored = await runInDurableObject(stubFor(bot.botKey), (_i, state) =>
+			state.storage.sql.exec<{ code_hash: string }>("SELECT code_hash FROM removal_codes WHERE account_id = 'bob'").one().code_hash,
+		);
+		expect(stored).toBe(await hex(CODE));
+		expect(stored).not.toContain(CODE);
+		a.ws.close();
+		b.ws.close();
+	});
+
+	it("forget: deletes the account's data, closes its sockets and tells one other profile", async () => {
+		const { bot, a, b } = await threeProfiles();
+		const c = await connect(bot, "carol", "Carol");
+		// One update waiting for bob (queued, not acked).
+		const press = { update_id: 700, callback_query: { id: "q", data: "c|bob|open|1", message: { message_id: 900, chat: { id: CHAT } } } };
+		await hook(bot.botKey, bot.secret, press);
+		await b.next("update");
+		expect(await leftovers(bot.botKey, "bob")).toEqual({ accounts: 1, routes: 1, pending: 1, codes: 1, removed: 0 });
+
+		a.send({ type: "forget", accountId: "bob" });
+		expect(await b.next("removed")).toEqual({ type: "removed" });
+		expect((await b.closed).code).toBe(CLOSE.REMOVED);
+		const notice = await Promise.any([a.next("account_removed"), c.next("account_removed")]);
+		expect(notice).toEqual({ type: "account_removed", accountId: "bob", label: "Bob" });
+		// Exactly one profile got it.
+		expect((await silent(a, "account_removed")) && (await silent(c, "account_removed"))).toBe(true);
+		expect(await leftovers(bot.botKey, "bob")).toEqual({ accounts: 0, routes: 0, pending: 0, codes: 0, removed: 1 });
+
+		// bob is gone from presence.
+		const presence = await a.next("presence");
+		expect(presence.accounts.map((x: Frame) => x.accountId)).not.toContain("bob");
+		a.ws.close();
+		c.ws.close();
+	});
+
+	it("forget of itself (Settings) sends no account_removed: that profile told the user already", async () => {
+		const { bot, a, b } = await threeProfiles();
+		b.send({ type: "forget", accountId: "bob" });
+		await b.next("removed");
+		expect((await b.closed).code).toBe(CLOSE.REMOVED);
+		expect(await silent(a, "account_removed")).toBe(true);
+		expect((await leftovers(bot.botKey, "bob")).removed).toBe(1);
+		a.ws.close();
+	});
+
+	it("forget of an unknown or malformed accountId is an error, and changes nothing", async () => {
+		const { bot, a, b } = await threeProfiles();
+		a.send({ type: "forget", accountId: "nobody" });
+		expect(await a.next("error")).toMatchObject({ error: "unknown_account" });
+		a.send({ type: "forget", accountId: "bad id!" });
+		expect(await a.next("error")).toMatchObject({ error: "bad_forget" });
+		expect((await leftovers(bot.botKey, "nobody")).removed).toBe(0);
+		a.ws.close();
+		b.ws.close();
+	});
+
+	it("queues account_removed when no other profile is online, for the next one that connects", async () => {
+		const { bot, a, b } = await threeProfiles();
+		a.ws.close();
+		await a.closed;
+		b.ws.close();
+		await b.closed;
+
+		// Uninstall of bob while nobody is online.
+		expect((await bye(bot.botKey, "bob", CODE)).status).toBe(200);
+		expect((await leftovers(bot.botKey, "bob")).removed).toBe(1);
+
+		const a2 = await connect(bot, "alice", "Alice");
+		expect(await a2.next("account_removed")).toEqual({ type: "account_removed", accountId: "bob", label: "Bob" });
+		a2.ws.close();
+		await a2.closed;
+		// Delivered once only.
+		const a3 = await connect(bot, "alice", "Alice");
+		expect(await silent(a3, "account_removed")).toBe(true);
+		a3.ws.close();
+	});
+
+	it("GET /bye with the right code removes the account and shows the page", async () => {
+		const { bot, a, b } = await threeProfiles();
+		const res = await bye(bot.botKey, "bob", CODE);
+		expect(res.status).toBe(200);
+		expect(res.headers.get("cache-control")).toBe("no-store");
+		expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+		expect(await res.text()).toContain(PAGE_TEXT);
+		expect((await b.closed).code).toBe(CLOSE.REMOVED);
+		// Not removed by a profile, so the other profile tells the user.
+		expect(await a.next("account_removed")).toEqual({ type: "account_removed", accountId: "bob", label: "Bob" });
+		expect(await leftovers(bot.botKey, "bob")).toEqual({ accounts: 0, routes: 0, pending: 0, codes: 0, removed: 1 });
+		a.ws.close();
+	});
+
+	it("GET /bye with a wrong code shows the very same page and removes nothing", async () => {
+		const { bot, a, b } = await threeProfiles();
+		const good = await (await bye(bot.botKey, "bob", "0".repeat(64))).text();
+		for (const [botKey, accountId, code] of [
+			[bot.botKey, "bob", "0".repeat(64)], // wrong code
+			[bot.botKey, "bob", "short"], // malformed code
+			[bot.botKey, "nobody", CODE], // unknown account
+			[bot.botKey, "alice", CODE], // another account's code
+			["nothex", "bob", CODE], // malformed botKey
+		]) {
+			const res = await bye(botKey!, accountId!, code!);
+			expect(res.status).toBe(200);
+			expect(await res.text()).toBe(good);
+		}
+		expect(good).toContain(PAGE_TEXT);
+		expect(await leftovers(bot.botKey, "bob")).toEqual({ accounts: 1, routes: 1, pending: 0, codes: 1, removed: 0 });
+		expect(await silent(b, "removed")).toBe(true);
+		a.ws.close();
+		b.ws.close();
+	});
+
+	it(`rate limits GET /bye to ${BYE_RATE_LIMIT} calls per minute per bot`, async () => {
+		const { bot, a, b } = await threeProfiles();
+		for (let i = 0; i < BYE_RATE_LIMIT; i++) expect((await bye(bot.botKey, "bob", "0".repeat(64))).status).toBe(200);
+		// Over the limit even the right code is not checked.
+		expect((await bye(bot.botKey, "bob", CODE)).status).toBe(429);
+		expect((await leftovers(bot.botKey, "bob")).removed).toBe(0);
+		await runInDurableObject(stubFor(bot.botKey), (_i, state) => {
+			state.storage.sql.exec("UPDATE bye_hits SET at = at - 60000");
+		});
+		expect((await bye(bot.botKey, "bob", CODE)).status).toBe(200);
+		expect((await leftovers(bot.botKey, "bob")).removed).toBe(1);
+		a.ws.close();
+	});
+
+	it("auth refuses a removed accountId, but a new accountId on the same bot works", async () => {
+		const { bot, a, b } = await threeProfiles();
+		a.send({ type: "forget", accountId: "bob" });
+		await b.closed;
+
+		// An old copy of the extension with the right secret and the old id.
+		const old = await open(bot.botKey, "bob");
+		old.send({ type: "auth", secret: bot.secret, accountId: "bob", label: "Bob" });
+		expect(await old.next("removed")).toEqual({ type: "removed" });
+		expect((await old.closed).code).toBe(CLOSE.REMOVED);
+
+		// A wrong secret still gets 4003, not "removed": strangers learn nothing.
+		const stranger = await open(bot.botKey, "bob");
+		stranger.send({ type: "auth", secret: "f".repeat(64), accountId: "bob", label: "x" });
+		expect((await stranger.closed).code).toBe(CLOSE.AUTH_FAILED);
+
+		// A new setup makes a new accountId: clean state, no claims, connects.
+		const fresh = await connect(bot, "bobnew01", "Bob");
+		expect(fresh.ready.accountId).toBe("bobnew01");
+		expect(await leftovers(bot.botKey, "bobnew01")).toEqual({ accounts: 1, routes: 0, pending: 0, codes: 0, removed: 0 });
+
+		// After 90 days the old id may connect again.
+		await runInDurableObject(stubFor(bot.botKey), (_i, state) => {
+			state.storage.sql.exec("UPDATE removed SET at = at - ?", REMOVED_TTL_MS);
+		});
+		const back = await connect(bot, "bob", "Bob");
+		expect(back.ready.accountId).toBe("bob");
+		a.ws.close();
+		fresh.ws.close();
+		back.ws.close();
+	});
+
+	it("presence and ready list offline accounts with their labels", async () => {
+		const bot = await newBot();
+		const b = await connect(bot, "bob", "Bob (spare)");
+		b.ws.close();
+		await b.closed;
+		const a = await connect(bot, "alice", "Alice");
+		expect(a.ready.accounts).toEqual([
+			expect.objectContaining({ accountId: "alice", label: "Alice", online: true }),
+			expect.objectContaining({ accountId: "bob", label: "Bob (spare)", online: false }),
+		]);
+		const c = await connect(bot, "carol", "Carol");
+		await a.next("presence"); // alice's own join
+		const presence = await a.next("presence");
+		expect(presence.accounts).toContainEqual(expect.objectContaining({ accountId: "bob", label: "Bob (spare)", online: false }));
+		expect(presence.accounts).toHaveLength(3);
+		a.ws.close();
+		c.ws.close();
+	});
+
+	it("the alarm deletes removed-list entries after 90 days", async () => {
+		const { bot, a, b } = await threeProfiles();
+		a.send({ type: "forget", accountId: "bob" });
+		await b.closed;
+		a.ws.close();
+		await a.closed;
+		const stub = stubFor(bot.botKey);
+		await runInDurableObject(stub, (_i, state) => {
+			state.storage.sql.exec("UPDATE removed SET at = at - ?", REMOVED_TTL_MS);
+			state.storage.sql.exec("DELETE FROM routes");
+		});
+		expect(await runDurableObjectAlarm(stub)).toBe(true);
+		expect((await leftovers(bot.botKey, "bob")).removed).toBe(0);
 	});
 });

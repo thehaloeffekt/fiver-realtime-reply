@@ -7,6 +7,14 @@ export interface StatusLine {
   text: string;
 }
 
+/** Popup and setup notice after the relay removed this profile (/remove, or an uninstall elsewhere). */
+export const REMOVED_NOTICE = 'This profile was removed from the bot. Set it up again to use it.';
+
+/** The removed notice, while the profile is not set up again. */
+export function removedNotice(l: LocalState): string | null {
+  return l.removedAt && !isConfigured(l) ? REMOVED_NOTICE : null;
+}
+
 export function telegramStatus(l: LocalState, s: SessionState): StatusLine {
   if (!l.token || !l.bot) return { tone: 'idle', text: 'No bot yet' };
   if (s.telegram.lastError && (!s.telegram.lastOkAt || s.telegram.lastErrorAt! > s.telegram.lastOkAt)) {

@@ -7,6 +7,31 @@ export { RelayHub } from "./relay";
 
 const HOOK_PATH = /^\/hook\/([^/]+)$/;
 const WS_PATH = /^\/ws\/([^/]+)$/;
+const BYE_PATH = /^\/bye\/([^/]*)$/;
+
+/**
+ * The one page GET /bye shows, whether the code was right or not: a
+ * different page would tell an attacker which codes are correct. The URL
+ * holds the removal code, so the page loads nothing and sends no referrer.
+ */
+const BYE_PAGE = `<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fiverr Telegram Alerts</title>
+<body style="font-family: system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1rem; line-height: 1.5">
+<p>This profile was disconnected. You can close this tab.</p>
+</body>
+</html>
+`;
+
+const BYE_HEADERS = {
+	"content-type": "text/html; charset=utf-8",
+	"cache-control": "no-store",
+	"referrer-policy": "no-referrer",
+	"content-security-policy": "default-src 'none'; style-src 'unsafe-inline'",
+	"x-robots-tag": "noindex",
+};
 
 function text(body: string, status: number, headers?: HeadersInit): Response {
 	return new Response(body, { status, headers: { "content-type": "text/plain; charset=utf-8", ...headers } });
@@ -40,6 +65,19 @@ export default {
 			const stub = env.RELAY.get(env.RELAY.idFromName(botKey));
 			const status = await stub.handleWebhook(request.headers.get(SECRET_HEADER), body);
 			return new Response(null, { status });
+		}
+
+		const bye = BYE_PATH.exec(path);
+		if (bye) {
+			if (request.method !== "GET") return text("method not allowed", 405, { allow: "GET" });
+			const botKey = bye[1]!;
+			// Malformed input gets the same page as a wrong code (see BYE_PAGE).
+			if (HEX64.test(botKey)) {
+				const stub = env.RELAY.get(env.RELAY.idFromName(botKey));
+				const status = await stub.handleBye(url.searchParams.get("accountId") ?? "", url.searchParams.get("code") ?? "");
+				if (status === 429) return text("Too many requests. Try again in a minute.", 429, { "retry-after": "60", "cache-control": "no-store" });
+			}
+			return new Response(BYE_PAGE, { status: 200, headers: BYE_HEADERS });
 		}
 
 		const ws = WS_PATH.exec(path);

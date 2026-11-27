@@ -6,7 +6,7 @@
  * without stopping alerts.
  */
 import { RecentIds } from '../lib/dedupe';
-import { relayWsBase } from '../lib/keys';
+import { relayWsBase, sha256Hex } from '../lib/keys';
 import { getLocal, getSession, labelOf, setLocal, setSession, updateLocal, updateSession, type PresenceAccount, type RelayStatus } from '../lib/storage';
 
 export const PING_INTERVAL_MS = 20_000;
@@ -18,10 +18,18 @@ const BACKOFF_MS = [3_000, 60_000, 2 * 60_000, 5 * 60_000, 10 * 60_000];
 /** Close codes from the relay (README "Close codes"). */
 const CLOSE_AUTH_FAILED = 4003;
 const CLOSE_REPLACED = 4009;
+/** The relay removed this account (forget, /bye, or a removed accountId at auth). */
+export const CLOSE_REMOVED = 4010;
+/** How long "Disconnect this profile" waits for the relay to confirm the forget. */
+const FORGET_TIMEOUT_MS = 5_000;
 
 export interface RelayHandlers {
   onUpdate(update: Record<string, unknown>, routed: boolean): void;
   onOffline(accountId: string, label: string): void;
+  /** Another account was removed from the bot (relay "account_removed"). */
+  onAccountRemoved(accountId: string, label: string): void;
+  /** This account was removed somewhere else (relay "removed" or close 4010). */
+  onRemoved(): void;
 }
 
 let handlers: RelayHandlers | null = null;
@@ -32,6 +40,8 @@ let lastFrameAt = 0;
 /** True between the relay's "ready" frame and the socket closing. */
 let isReadyNow = false;
 let readyWaiters: Array<{ resolve: () => void; reject: (e: Error) => void }> = [];
+/** Set while this profile removes itself (Settings): the relay's "removed" is the answer, not news. */
+let forgetting: (() => void) | null = null;
 
 let recentIds: RecentIds | null = null;
 async function ids(): Promise<RecentIds> {
@@ -88,7 +98,9 @@ export async function connectRelay(force = false): Promise<void> {
   ws = socket;
   isReadyNow = false;
   lastFrameAt = 0;
-  const auth = JSON.stringify({ type: 'auth', secret: s.secret, accountId: s.accountId, label: labelOf(s).slice(0, 64) });
+  // Only the hash of the removal code goes to the relay (see GET /bye).
+  const removalCodeHash = s.removalCode ? await sha256Hex(s.removalCode) : undefined;
+  const auth = JSON.stringify({ type: 'auth', secret: s.secret, accountId: s.accountId, label: labelOf(s).slice(0, 64), removalCodeHash });
 
   socket.onopen = () => {
     // The auth frame must be first, within 5 s. accountId equals the one in the URL.
@@ -173,6 +185,17 @@ async function onFrame(socket: WebSocket, frame: Record<string, unknown>) {
     case 'offline':
       handlers?.onOffline(String(frame.accountId ?? ''), String(frame.label ?? ''));
       return;
+    case 'account_removed':
+      handlers?.onAccountRemoved(String(frame.accountId ?? ''), String(frame.label ?? ''));
+      return;
+    case 'removed':
+      // Stop for good: no retry timer, and the 4010 close that follows is ignored.
+      clearTimeout(quickRetry);
+      closeSocket(1000, 'removed');
+      settleWaiters(new Error('This profile was removed from the bot.'));
+      if (forgetting) forgetting();
+      else handlers?.onRemoved();
+      return;
     case 'error':
       console.warn('[relay] error frame', frame);
       return;
@@ -183,6 +206,14 @@ async function onClosed(code: number | undefined, reason: string) {
   clearInterval(pingTimer);
   ws = null;
   isReadyNow = false;
+
+  if (code === CLOSE_REMOVED) {
+    // The "removed" frame was lost; same meaning. Never reconnect.
+    settleWaiters(new Error('This profile was removed from the bot.'));
+    if (forgetting) forgetting();
+    else handlers?.onRemoved();
+    return;
+  }
 
   let lastError: string | undefined = reason || undefined;
   if (code === CLOSE_AUTH_FAILED) lastError = 'The relay rejected this bot (wrong secret). Check the bot token.';
@@ -221,6 +252,43 @@ export async function disconnectRelay() {
   closeSocket(1000, 'disconnect');
   settleWaiters(new Error('Disconnected.'));
   await setSession({ relay: { phase: 'idle', attempts: 0 }, presence: [] });
+}
+
+/**
+ * "Disconnect this profile": asks the relay to forget this account and waits
+ * for its "removed" answer. False when the relay could not be reached or did
+ * not answer in 5 s; the caller goes on anyway (the user can still /remove
+ * the profile from Telegram, where it then shows as offline).
+ */
+export async function forgetSelf(): Promise<boolean> {
+  const { accountId } = await getLocal();
+  if (!accountId) return false;
+  try {
+    await connectRelay();
+  } catch {
+    return false;
+  }
+  const socket = ws;
+  if (!socket || !isReadyNow) return false;
+  return new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => {
+      forgetting = null;
+      resolve(false);
+    }, FORGET_TIMEOUT_MS);
+    forgetting = () => {
+      clearTimeout(timer);
+      forgetting = null;
+      resolve(true);
+    };
+    socket.send(JSON.stringify({ type: 'forget', accountId }));
+  });
+}
+
+/** /remove: asks the relay to forget another account. False when the socket is not ready. */
+export function sendForget(accountId: string): boolean {
+  if (!ws || !isReadyNow) return false;
+  ws.send(JSON.stringify({ type: 'forget', accountId }));
+  return true;
 }
 
 /** Runs from the one-minute alarm: reconnects when the backoff time has passed. */

@@ -221,6 +221,18 @@ skipped by your username (from the account menu) or the "Me" name. "Translate
 to English" and "Create an offer" are interface text and are never part of a
 body. The reply has **Open conversation** and **Check now** buttons.
 
+**Long messages and Telegram's 4,096 limit** (`src/lib/split.ts`). Telegram
+refuses a message over 4,096 characters (counted after the HTML is parsed) and
+text that is not valid UTF-8. An alert shows at most 3,500 characters of the
+buyer's message and then "… (message cut, open Fiverr for the rest)", so it
+always fits. "Full message" shows each buyer message up to 8,000 characters
+(then the same note) and sends the reply as several Telegram messages, split at
+line breaks without cutting a tag, an `&amp;` or an emoji. The first part
+replies to the command and the buttons go on the last. Over 5 parts, the
+oldest buyer messages are left out and a line says how many. No cut ever
+splits an emoji (a surrogate pair), and `sendMessage` replaces any lone
+surrogate with U+FFFD as a last guard.
+
 **Message times: my time and the buyer's time** (`src/lib/buyerTime.ts`). A
 conversation page shows three zones: message times are in the Fiverr
 account's zone, the header shows the buyer's local time, and you have your
@@ -317,11 +329,13 @@ after each extension update, so they show in Telegram's "/" menu.
 | `/check {label}` | only that account |
 | `/full {username}` (with or without `@`) | each account that has that buyer in its inbox list |
 | `/full {username} {label}` | only that account, also when it does not have the buyer |
-| `/status` | each account: label, online, alerts on/paused, unread count, last alert; the leader adds offline accounts |
+| `/status` | each account: label, online, alerts on/paused, unread conversations (the Fiverr "Unread" chip counts conversations, not messages), last alert; the leader adds offline accounts |
 | `/pause`, `/resume` | every account, replying with its new state |
 | `/pause {label}`, `/resume {label}` | only that account |
 | `/timezone {zone}` (`Africa/Lagos`, or a short form such as `Lagos` that matches one zone) | every account saves it and confirms; the leader names offline accounts, which miss it, and alone answers an unknown or ambiguous zone |
 | `/timezone` | each account: the zone it uses now, or "not set" with the browser zone |
+| `/accounts` | the leader: every profile on the bot with its label, online or offline (last seen), and its account id |
+| `/remove {label}` or `/remove {accountId}` | the leader: removes that profile from the bot (see Removing a profile). Refuses an unknown label and lists the valid ones; asks for the account id when two profiles have the same label; refuses its own label (use Settings on that profile) |
 | `/help` | the leader: commands and examples |
 
 The relay sends every command to every profile, and each one decides for
@@ -340,6 +354,52 @@ Chrome" / "alerts on"), so every device on the chat sees it. `/pause` and
 `/resume` reply instead. Messages that arrive while paused are not sent later:
 the list state keeps updating, so `/resume` does not replay them.
 
+## Removing a profile
+
+A profile (one Chrome profile, one Fiverr account) can be removed from the bot
+in three ways. The relay side is described in the root README (Removal).
+
+**Settings → Disconnect this profile.** After a confirmation step, in this
+order: a Telegram notice ("{label} was disconnected from this bot."), the
+`forget` frame (the extension waits up to 5 s for the relay's `removed`
+answer), close the socket, close the watch tab, clear all alarms, and clear
+all extension storage. The notice needs the token and the chat, and the forget
+needs the socket, so storage goes last. If the relay's account list shows that
+this was the last account on the bot, `deleteWebhook` is called too, before
+storage is cleared (it needs the token); with other accounts, even offline
+ones, the webhook stays, because they share it. If Telegram or the relay
+cannot be reached the profile is still cleared, and the relay keeps it as an
+offline account that `/remove` can remove later. Settings then shows the first
+setup step.
+
+**Uninstall.** At setup and at every service worker start the extension calls
+`chrome.runtime.setUninstallURL` with
+`{relay}/bye/{botKey}?accountId={accountId}&code={removalCode}`. The removal
+code is 32 random bytes made at setup; the relay gets only its SHA-256 (in the
+auth frame). The URL stays in browser history, so it never holds the bot token
+or the secret, only a code that can remove this one account. With the default
+relay it is about 200 characters, under Chrome's 1,023 limit (and under 255, the
+limit in Chrome versions before 2023). After a removal the URL is cleared.
+
+**Telegram `/remove {label}`.** The leader sends `forget` for that account. If
+the profile is online, the relay sends it `removed`; if it is offline, the
+relay refuses it with `removed` when it next connects. Either way it stops,
+does not reconnect, closes the watch tab, clears alarms and storage, and the
+popup says "This profile was removed from the bot. Set it up again to use it."
+Without this a removed profile would retry the relay forever.
+
+When the relay removes an account that did not remove itself (`/remove`,
+uninstall), it sends `account_removed` to one online profile, which posts
+"{label} was removed from this bot." If none is online the relay keeps it for
+the next profile that connects.
+
+**A new setup after a removal.** Clearing storage writes a new random
+accountId. The relay keeps the old id on a removed list for 90 days, so an old
+copy of the profile (a restored profile folder, say) is refused instead of
+coming back without notice, while a new setup uses the new id and starts
+clean. The removed flag is not cleared by a correct secret, because an old
+copy has the correct secret too.
+
 ## Files
 
 ```
@@ -350,12 +410,14 @@ src/lib/inboxRow.ts         inbox list row parser (attributes, text order fallba
 src/lib/listState.ts        per-username list state, new-message rule, gap compare
 src/lib/callback.ts         callback_data format
 src/lib/telegram.ts         Bot API client (text only), retries with backoff
-src/lib/format.ts           alert text and buttons
+src/lib/format.ts           alert text and buttons, message cut note
+src/lib/split.ts            Telegram length: visible length, split long HTML, emoji-safe cuts
 src/background/relay.ts     WebSocket client: auth, ping, ack, claims, backoff
 src/background/watchTab.ts  pinned tab, reload alarm, reads, job queue
 src/background/alerts.ts    toast / list message → Telegram
 src/background/listSync.ts  saved list state, compare after reloads, stale page check
-src/background/commands.ts  commands (/check /full /status /pause /resume /timezone /help), buttons, leader rule, offline notice
+src/background/commands.ts  commands (/check /full /status /pause /resume /timezone /accounts /remove /help), buttons, leader rule, offline and removed notices
+src/background/setup.ts     setup step 2, uninstall URL, Disconnect this profile, removed elsewhere
 src/background/buyerZones.ts saved buyer UTC offsets per username
 src/lib/buyerTime.ts        message time from the id, buyer offset from the header clock, formatting
 src/lib/myZone.ts           My time zone: setting, browser fallback, zone lookup and offsets

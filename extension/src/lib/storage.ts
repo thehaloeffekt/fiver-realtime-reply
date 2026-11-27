@@ -17,6 +17,14 @@ export interface LocalState {
   /** Until this time, this profile is "waiting at step 3" and replies "Linked" to /start. */
   linkWaitUntil?: number;
   accountId?: string;
+  /**
+   * Random code (64 hex chars) made at setup. The relay keeps only its
+   * SHA-256; the uninstall URL carries the code, so the relay can remove
+   * this one account after an uninstall. Never the token or the secret.
+   */
+  removalCode?: string;
+  /** Set when the relay removed this profile (/remove or uninstall elsewhere); drives the popup notice. */
+  removedAt?: number;
   label?: string;
   /** Logged-in Fiverr username, read from the profile button in the page header. */
   detectedUsername?: string;
