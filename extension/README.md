@@ -221,6 +221,16 @@ skipped by your username (from the account menu) or the "Me" name. "Translate
 to English" and "Create an offer" are interface text and are never part of a
 body. The reply has **Open conversation** and **Check now** buttons.
 
+**Long messages.** Telegram refuses a message over 4,096 characters (counted
+after HTML parsing) or with invalid UTF-8. An alert's body gets whatever room
+its other lines leave, at most 3,500 characters; a Full message entry is cut at
+1,500 and lists at most 10 file names (`[+N more files]`). A cut text ends in
+`… (message cut, open Fiverr for the rest)` and is never cut inside an emoji (a
+half emoji is invalid UTF-8). A long Full message reply is split into numbered
+messages of at most 4,000 characters, never inside one buyer message, with the
+buttons under the last; past 5 messages the oldest buyer messages are left out
+with a note.
+
 **Message times: my time and the buyer's time** (`src/lib/buyerTime.ts`). A
 conversation page shows three zones: message times are in the Fiverr
 account's zone, the header shows the buyer's local time, and you have your

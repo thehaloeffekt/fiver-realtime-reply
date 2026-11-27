@@ -5,7 +5,7 @@
  * conversation header). Names, usernames and texts are made up.
  */
 import { afterEach, describe, expect, it } from 'vitest';
-import { formatConversation, fullReplyText } from '../src/background/commands';
+import { formatConversation, fullReplyParts } from '../src/background/commands';
 import {
   MAX_OFFSET,
   MIN_OFFSET,
@@ -200,13 +200,13 @@ describe('Full message with my time and the buyer time', () => {
 
   it('top line: buyer local time now, offset and country', () => {
     const paris = { zone: 'Europe/Paris', set: true };
-    const html = fullReplyText('Main', 'some_buyer', 'line', { ...uk, country: 'Example Country' }, paris, now);
+    const html = fullReplyParts('Main', 'some_buyer', ['line'], { ...uk, country: 'Example Country' }, paris, now)[0]!;
     expect(html.split('\n').slice(0, 3)).toEqual([
       '<b>Main</b>: last messages from <b>@some_buyer</b>',
       'Times: Europe/Paris. Buyer local time now: 9:54 AM (UTC+0, Example Country)',
       'line',
     ]);
-    expect(fullReplyText('Main', 'some_buyer', 'line', null, paris, now).split('\n').slice(1, 3)).toEqual(['Times: Europe/Paris.', 'line']);
+    expect(fullReplyParts('Main', 'some_buyer', ['line'], null, paris, now)[0]!.split('\n').slice(1, 3)).toEqual(['Times: Europe/Paris.', 'line']);
   });
 
   it('my time uses the zone it is given', () => {

@@ -27,6 +27,7 @@ vi.mock('../src/background/view', () => ({ conversationInView: async (u: string)
 
 const { handleListMessage, handleThreadMessage, handleToast } = await import('../src/background/alerts');
 const { DEFAULT_SETTINGS } = await import('../src/lib/storage');
+const { telegramLength } = await import('../src/lib/format');
 const { OFF_INBOX_MS, restDecision } = await import('../src/background/listSync');
 
 let n = 0;
@@ -67,6 +68,15 @@ describe('thread detector alerts', () => {
     await toast('see the attached sketch');
     expect(sent).toHaveLength(1);
     expect(sent[0]!.html).toContain('see the attached sketch [file: logo-draft.png]');
+  });
+
+  it('a very long message (with emoji) is cut with the note and stays under 4096', async () => {
+    await thread({ text: `${'😀 long text & more <here> '.repeat(2000)}`, files: ['brief.pdf'] });
+    expect(sent).toHaveLength(1);
+    const html = sent[0]!.html;
+    expect(html).toContain('… (message cut, open Fiverr for the rest)');
+    expect(telegramLength(html)).toBeLessThanOrEqual(4096);
+    expect(() => encodeURIComponent(html)).not.toThrow(); // no half emoji
   });
 
   it('the same message id from two tabs alerts once, even after the 20 s window', async () => {

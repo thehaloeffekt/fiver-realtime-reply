@@ -11,8 +11,8 @@
  */
 import { buyerNowLine, formatBuyerAt, formatMine, messageSentAt, type BuyerZone } from '../lib/buyerTime';
 import { decodeCallback, encodeCallback, isCallbackForMe } from '../lib/callback';
-import { INBOX_URL, inboxUrlFor } from '../lib/constants';
-import { formatTime, truncate } from '../lib/format';
+import { FULL_MESSAGE_CHARS, INBOX_URL, MAX_FILES_SHOWN, MAX_FULL_PARTS, SAFE_MESSAGE_CHARS, inboxUrlFor } from '../lib/constants';
+import { cutText, formatTime, telegramLength, truncate } from '../lib/format';
 import { lookupZone, myZone, zoneNote, zoneOffsetText, type MyZone } from '../lib/myZone';
 import type { ConversationMessage, InboxSnapshot, ListStatus } from '../lib/messages';
 import { getLocal, getSession, knownLabel, labelOf, patchSettings, setLocal, type LocalState, type PresenceAccount } from '../lib/storage';
@@ -351,29 +351,35 @@ async function replyCheck(s: LocalState, replyTo?: number) {
 }
 
 /**
- * One line per message, oldest first:
+ * One entry per message, oldest first:
  * "<i>Nov 16, 10:53 AM (buyer 9:53 AM)</i>: text [file: name]".
  *
  * My time comes from the message id (a time-based UUID), shown in
  * `timeZone` (My time zone, never the browser's default). The buyer's time
  * is the same moment at the buyer's offset, with their day when it differs
- * from mine, and "?" when the offset
- * is over 30 days old. If the id gives no time, the page's text is shown and
- * marked as the Fiverr account's zone. Files are named, never sent.
+ * from mine, and "?" when the offset is over 30 days old. If the id gives no
+ * time, the page's text is shown and marked as the Fiverr account's zone.
+ * Files are named, never sent. A long text is cut at FULL_MESSAGE_CHARS with
+ * CUT_NOTE, and at most MAX_FILES_SHOWN names are listed, so one entry always
+ * fits in one Telegram message.
  */
-export function formatConversation(messages: ConversationMessage[], zone: BuyerZone | null, timeZone: string, now = Date.now()): string {
-  if (!messages.length) return 'No messages from the buyer found.';
-  return messages
-    .map((m) => {
-      const parts = [m.text ? escapeHtml(truncate(m.text, 600)) : '', ...m.files.map((f) => `[file: ${escapeHtml(truncate(f, 120))}]`)].filter(Boolean);
-      const sentAt = messageSentAt(m.id);
-      let when = '';
-      if (sentAt !== null) when = formatMine(sentAt, timeZone) + (zone ? ` (buyer ${formatBuyerAt(sentAt, zone, now, timeZone)})` : '');
-      else if (m.time) when = `${m.time} (Fiverr account time)`;
-      return `${when ? `<i>${escapeHtml(when)}</i>: ` : ''}${parts.join(' ') || '(no text)'}`;
-    })
-    .join('\n');
+export function conversationEntries(messages: ConversationMessage[], zone: BuyerZone | null, timeZone: string, now = Date.now()): string[] {
+  if (!messages.length) return ['No messages from the buyer found.'];
+  return messages.map((m) => {
+    const files = m.files.slice(0, MAX_FILES_SHOWN).map((f) => `[file: ${escapeHtml(truncate(f, 120))}]`);
+    if (m.files.length > MAX_FILES_SHOWN) files.push(`[+${m.files.length - MAX_FILES_SHOWN} more files]`);
+    const parts = [m.text ? escapeHtml(cutText(m.text, FULL_MESSAGE_CHARS)) : '', ...files].filter(Boolean);
+    const sentAt = messageSentAt(m.id);
+    let when = '';
+    if (sentAt !== null) when = formatMine(sentAt, timeZone) + (zone ? ` (buyer ${formatBuyerAt(sentAt, zone, now, timeZone)})` : '');
+    else if (m.time) when = `${truncate(m.time, 40)} (Fiverr account time)`;
+    return `${when ? `<i>${escapeHtml(when)}</i>: ` : ''}${parts.join(' ') || '(no text)'}`;
+  });
 }
+
+/** The entries as one text, one message per line (a message may itself span lines). */
+export const formatConversation = (messages: ConversationMessage[], zone: BuyerZone | null, timeZone: string, now = Date.now()): string =>
+  conversationEntries(messages, zone, timeZone, now).join('\n');
 
 /**
  * "Times: Africa/Lagos. Buyer local time now: 6:07 PM (UTC+0, United Kingdom)".
@@ -384,19 +390,62 @@ export function timesLine(mine: MyZone, zone: BuyerZone | null, now: number): st
   return zone ? `${times} ${buyerNowLine(zone, now, mine.zone)}` : times;
 }
 
-/** The whole "Full message" reply, kept under Telegram's 4096 limit by dropping the oldest lines. */
-export function fullReplyText(label: string, username: string, body: string, zone: BuyerZone | null, mine: MyZone, now = Date.now()): string {
-  const top = [`<b>${escapeHtml(label)}</b>: last messages from <b>@${escapeHtml(username)}</b>`, escapeHtml(timesLine(mine, zone, now))];
-  const header = top.join('\n');
-  const footer = '\n\n<i>Opening the conversation marked it as read on Fiverr.</i>';
-  // Drop whole lines, so an HTML tag is never cut.
-  const lines = body.split('\n');
-  while (lines.length > 1 && header.length + footer.length + lines.join('\n').length + 1 > 4000) lines.shift();
-  return `${header}\n${lines.join('\n')}${footer}`;
+const FULL_FOOTER = '\n\n<i>Opening the conversation marked it as read on Fiverr.</i>';
+const droppedNote = (n: number) => `<i>${n} older ${n === 1 ? 'message was' : 'messages were'} left out to keep this short. Open Fiverr for ${n === 1 ? 'it' : 'them'}.</i>`;
+
+/** Entries in groups whose joined length stays within `budget`. */
+function pack(entries: string[], budget: number): string[][] {
+  const groups: string[][] = [];
+  let cur: string[] = [];
+  let len = 0;
+  for (const e of entries) {
+    const l = telegramLength(e) + (cur.length ? 1 : 0);
+    if (cur.length && len + l > budget) {
+      groups.push(cur);
+      cur = [];
+      len = 0;
+    }
+    len += telegramLength(e) + (cur.length ? 1 : 0);
+    cur.push(e);
+  }
+  if (cur.length) groups.push(cur);
+  return groups;
+}
+
+/** Plain text of an entry (tags removed, entities decoded), for the rare entry that is too long. */
+const plainOf = (html: string) => html.replace(/<[^>]*>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+
+/**
+ * The "Full message" reply as one or more Telegram messages, each within
+ * SAFE_MESSAGE_CHARS (Telegram refuses over 4096). Messages are never split
+ * across parts; parts are numbered "(part 2 of 3)". Past MAX_FULL_PARTS the
+ * oldest messages are left out, with a note, so the chat is not flooded.
+ */
+export function fullReplyParts(label: string, username: string, entries: string[], zone: BuyerZone | null, mine: MyZone, now = Date.now()): string[] {
+  const name = escapeHtml(truncate(label, 64));
+  const user = escapeHtml(truncate(username, 64));
+  const title = `<b>${name}</b>: last messages from <b>@${user}</b>`;
+  const times = escapeHtml(timesLine(mine, zone, now));
+  const partOf = (i: number, n: number) => (n > 1 ? ` (part ${i} of ${n})` : '');
+  const headOf = (i: number, n: number) => (i === 1 ? `${title}${partOf(i, n)}\n${times}` : `<b>${name}</b>: @${user}${partOf(i, n)}`);
+  // Room left for messages in any part: the longest header and the footer are reserved.
+  const budget = SAFE_MESSAGE_CHARS - telegramLength(headOf(1, MAX_FULL_PARTS)) - telegramLength(FULL_FOOTER) - 1;
+
+  // Safety net: an entry that cannot fit alone is cut as plain text.
+  let list = entries.map((e) => (telegramLength(e) > budget ? escapeHtml(cutText(plainOf(e), budget)) : e));
+  let dropped = 0;
+  let groups = pack(list, budget);
+  while (groups.length > MAX_FULL_PARTS && list.length > 1) {
+    list = list.slice(1);
+    dropped++;
+    groups = pack([droppedNote(dropped), ...list], budget);
+  }
+  const n = groups.length;
+  return groups.map((g, i) => `${headOf(i + 1, n)}\n${g.join('\n')}${i === n - 1 ? FULL_FOOTER : ''}`);
 }
 
 async function replyFull(s: LocalState, username: string, replyTo?: number) {
-  let body: string;
+  let entries: string[];
   let zone: BuyerZone | null = null;
   const mine = myZone(s.settings);
   try {
@@ -406,15 +455,19 @@ async function replyFull(s: LocalState, username: string, replyTo?: number) {
       // entry (it keeps a country seen earlier).
       await saveBuyerZone(res.value.header);
       zone = zoneFor(await getLocal(), username);
-      body = formatConversation(res.value.messages, zone, mine.zone);
+      entries = conversationEntries(res.value.messages, zone, mine.zone);
     } else {
-      body = missingNote('The conversation', 'is', res.missing, res.error);
+      entries = [missingNote('The conversation', 'is', res.missing, res.error)];
     }
   } catch (err) {
-    body = `Could not read the conversation. ${escapeHtml(String((err as Error).message ?? err))}`;
+    entries = [`Could not read the conversation. ${escapeHtml(cutText(String((err as Error).message ?? err), 500))}`];
   }
-  const html = fullReplyText(labelOf(s), username, body, zone, mine);
-  await notify(html, { replyTo, keyboard: checkKeyboard(s.accountId!, { text: 'Open conversation', url: inboxUrlFor(username) }) });
+  const parts = fullReplyParts(labelOf(s), username, entries, zone, mine);
+  const keyboard = checkKeyboard(s.accountId!, { text: 'Open conversation', url: inboxUrlFor(username) });
+  // In order: the first part answers the alert, the buttons go under the last.
+  for (const [i, html] of parts.entries()) {
+    await notify(html, { replyTo: i === 0 ? replyTo : undefined, keyboard: i === parts.length - 1 ? keyboard : undefined });
+  }
 }
 
 /** The Unread chip count now (asks the watch tab), or the one from the last reload. */

@@ -40,6 +40,7 @@ vi.mock('../src/background/watchTab', () => ({
 
 const { BOT_COMMANDS, handleUpdate, helpText, parseCommand, pauseText, registerCommands, resolveTarget, unknownLabelText, validLabels } = await import('../src/background/commands');
 const { DEFAULT_SETTINGS } = await import('../src/lib/storage');
+const { telegramLength } = await import('../src/lib/format');
 const { readConversation } = await import('../src/background/watchTab');
 
 const CHAT = 77;
@@ -205,6 +206,19 @@ describe('/full', () => {
     asSecond();
     await say('/full');
     expect(sent).toHaveLength(0);
+  });
+
+  it('a very long conversation goes out as several messages, each under 4096; buttons under the last', async () => {
+    asMain();
+    const text = 'a long brief with details & <notes> '.repeat(600);
+    watch.conversation = { ok: true, value: { messages: Array.from({ length: 10 }, (_, i) => ({ id: `m${i}`, time: `Nov 16, ${i + 1}:00 AM`, text, files: [] })), header: null } };
+    await say('/full some_buyer');
+    expect(sent.length).toBeGreaterThan(1);
+    for (const m of sent) expect(telegramLength(m.html)).toBeLessThanOrEqual(4096);
+    expect(sent.every((m) => m.html.includes('… (message cut, open Fiverr for the rest)'))).toBe(true);
+    expect(sent.map((m) => Boolean(m.opts?.keyboard))).toEqual([...Array(sent.length - 1).fill(false), true]);
+    expect(sent.map((m) => m.opts?.replyTo)).toEqual([9, ...Array(sent.length - 1).fill(undefined)]);
+    expect(sent.at(-1)!.html).toContain('Nov 16, 10:00 AM'); // the newest message is kept
   });
 
   it('uses a saved offset when the header was not read this time', async () => {
