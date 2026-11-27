@@ -21,12 +21,18 @@
  * one row (the list re-rendered or more rows loaded) only refreshes the
  * baseline. A single new row with an unread count is a new conversation.
  *
+ * A row whose preview changes to a buyer message while it stays at 0 unread
+ * was read at once (its conversation is open in a tab, so Fiverr marks each
+ * new message read). It alerts as `read`, only while this tab is hidden or
+ * unfocused; the background then checks that nobody is looking at that
+ * conversation.
+ *
  * Everything runs inside the MutationObserver callback, with no timers:
  * hidden tabs delay timers by up to a minute, but observer callbacks run at
  * once. Read-only, like the rest of the content script.
  */
 import { parseRow, rowKey, type InboxRow, type ListMessage } from '../lib/inboxRow';
-import { isNewMessage, toListMessage, toRowState, type RowState } from '../lib/listState';
+import { isNewMessage, isReadAtOnce, toListMessage, toRowState, type RowState } from '../lib/listState';
 import { INBOX } from '../lib/selectors';
 
 /** New rows in the first seconds after the list appears are part of the page load. */
@@ -37,7 +43,16 @@ export interface InboxListHooks {
   onState?: (rows: Record<string, RowState>) => void;
   /** The list appeared (true) or disappeared (false). */
   onPresence?: (present: boolean) => void;
+  /**
+   * May a row that was read at once (new buyer preview, 0 unread) alert?
+   * Default: only while this tab is hidden or its window has no focus. A
+   * visible, focused tab means the user is on Fiverr and sees it.
+   */
+  mayAlertRead?: () => boolean;
 }
+
+/** Hidden tab, or a window without focus. Reads the page's state; changes nothing. */
+export const userAway = () => document.visibilityState === 'hidden' || !document.hasFocus();
 
 export function watchInboxList(onMessage: (m: ListMessage) => void, hooks: InboxListHooks = {}): () => void {
   let list: Element | null = null;
@@ -84,6 +99,9 @@ export function watchInboxList(onMessage: (m: ListMessage) => void, hooks: Inbox
       return;
     }
     if (isNewMessage(prev, r)) onMessage(toListMessage(r, r.unread - prev.unread));
+    // The conversation is open somewhere, so Fiverr marked the message read
+    // at once and the count stays 0. Only the preview tells.
+    else if (isReadAtOnce(prev, r) && (hooks.mayAlertRead ?? userAway)()) onMessage({ ...toListMessage(r, 1), read: true });
   };
   const onMutations = (ms: MutationRecord[]) => {
     const l = list;

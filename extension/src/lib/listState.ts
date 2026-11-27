@@ -41,6 +41,17 @@ export function isNewMessage(prev: RowState, r: InboxRow): boolean {
   return r.unread > prev.unread || r.preview.slice(0, PREVIEW_CHARS) !== prev.preview || prev.mine;
 }
 
+/**
+ * True when `r` shows a new buyer message that Fiverr already marked read:
+ * 0 unread, not mine, not "Typing...", and a different, non-empty preview.
+ * This happens when the conversation is open in a tab: Fiverr marks each new
+ * message in it read at once, so the row never becomes unread.
+ */
+export function isReadAtOnce(prev: RowState, r: InboxRow): boolean {
+  if (r.mine || r.typing || r.unread !== 0 || !r.preview.trim()) return false;
+  return r.preview.slice(0, PREVIEW_CHARS) !== prev.preview;
+}
+
 export function toListMessage(r: InboxRow, count: number): ListMessage {
   return { username: r.username, displayName: r.name, body: r.preview, count: Math.max(1, count) };
 }
@@ -69,20 +80,32 @@ export function stateOf(rows: InboxRow[], keep: Record<string, RowState> = {}): 
  *   row that was saved. That is where Fiverr puts a conversation that is new;
  *   an old row further down that we never saw (the list grew) stays quiet.
  * - A saved row that is gone from the fresh list: nothing.
+ * - With `readAtOnce`: a row that changed to a buyer message but shows 0
+ *   unread (read at once in an open conversation) is a `read` message.
  */
-export function compareWithSaved(saved: Record<string, RowState>, rows: InboxRow[]): ListMessage[] {
+export function compareWithSaved(saved: Record<string, RowState>, rows: InboxRow[], { readAtOnce = false } = {}): ListMessage[] {
   const firstKnown = rows.findIndex((r) => saved[rowKey(r)] !== undefined);
   const out: ListMessage[] = [];
   rows.forEach((r, i) => {
     const prev = saved[rowKey(r)];
     if (prev) {
       if (isNewMessage(prev, r)) out.push(toListMessage(r, r.unread - prev.unread));
+      // Only for a short gap (see READ_AT_ONCE_GAP_MS): after a long one a
+      // read row is more likely a message read on the phone.
+      else if (readAtOnce && isReadAtOnce(prev, r)) out.push({ ...toListMessage(r, 1), read: true });
     } else if (!r.mine && !r.typing && r.unread > 0 && firstKnown !== -1 && i < firstKnown) {
       out.push(toListMessage(r, r.unread));
     }
   });
   return out;
 }
+
+/**
+ * A read row with a new preview counts in the after-reload compare only if
+ * the saved state is this fresh (a reload or the return to /inbox, which save
+ * the state right before).
+ */
+export const READ_AT_ONCE_GAP_MS = 5 * 60_000;
 
 /** Saved state usable at `now`, or null. */
 export function usableSaved(saved: SavedListState | undefined, now: number): SavedListState | null {

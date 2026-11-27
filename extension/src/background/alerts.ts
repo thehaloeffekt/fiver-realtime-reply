@@ -4,10 +4,12 @@ import { myZone } from '../lib/myZone';
 import { formatAlert } from '../lib/format';
 import { INBOX_URL } from '../lib/constants';
 import type { ListMessage } from '../lib/inboxRow';
+import type { ThreadMessage } from '../lib/messages';
 import { getLocal, getSession, isConfigured, labelOf, setLocal, setSession, updateLocal, type RecentAlert } from '../lib/storage';
 import { describeBody, type Toast } from '../lib/toast';
 import { zoneFor } from './buyerZones';
 import { notify } from './notify';
+import { conversationInView } from './view';
 
 /** Keys are kept for REPLAY_WINDOW_MS so replayed toasts can be checked against them. */
 const deduper = new Deduper(DEDUPE_WINDOW_MS, REPLAY_WINDOW_MS);
@@ -35,7 +37,21 @@ interface Incoming {
   replay?: boolean;
   /** Extra messages this one change stands for (list only). */
   more?: number;
+  /** Text for the dedupe key when it differs from `body` (thread: the text without "[file: …]"). */
+  keyBody?: string;
+  /** What the alert says, when `body` is not run through describeBody (thread). */
+  shown?: { kind: 'text' | 'attachment'; text: string };
+  /** Fiverr's message id (thread only): a second key, so two tabs never alert twice. */
+  messageId?: string;
+  /** Dedupe window for the body key (default 20 s). */
+  windowMs?: number;
 }
+
+/**
+ * Window for alerts that may follow a thread alert for the same message
+ * later than the usual 20 s: a list row read at once, seen after a reload.
+ */
+const READ_WINDOW_MS = 10 * 60_000;
 
 /** A toast reported by any Fiverr tab of this profile. */
 export async function handleToast(toast: Toast): Promise<void> {
@@ -64,7 +80,39 @@ export async function handleListMessage(m: ListMessage): Promise<void> {
   let username = typeof m.username === 'string' && USERNAME.test(m.username) ? m.username : '';
   if (!username) username = (await getLocal()).knownUsers[senderKey(displayName)] ?? '';
   const count = Number.isFinite(m.count) ? Math.max(1, Math.min(99, Math.floor(m.count))) : 1;
-  return handleIncoming({ source: 'list', displayName, username, body: String(m.body ?? '').slice(0, 5000), more: count - 1 });
+  const body = String(m.body ?? '').slice(0, 5000);
+  if (m.read === true) {
+    // Read at once: the conversation is open in some tab. If the user is
+    // looking at it, they see the message; otherwise alert (deduped against
+    // the thread detector's alert for the same message).
+    if (!username || (await conversationInView(username))) return;
+    return handleIncoming({ source: 'list', displayName, username, body, windowMs: READ_WINDOW_MS });
+  }
+  return handleIncoming({ source: 'list', displayName, username, body, more: count - 1 });
+}
+
+const MESSAGE_ID = /^[A-Za-z0-9_-]{8,120}$/;
+
+/**
+ * A new buyer message in an open conversation (a tab the user is not
+ * looking at). Text plus "[file: name]" for each file, as in "Full message";
+ * the file itself is never read or sent.
+ */
+export async function handleThreadMessage(m: ThreadMessage): Promise<void> {
+  const username = typeof m?.username === 'string' && USERNAME.test(m.username) ? m.username : '';
+  const id = typeof m?.id === 'string' && MESSAGE_ID.test(m.id) ? m.id : '';
+  if (!username || !id) return;
+  // Another tab may show this conversation to the user right now.
+  if (await conversationInView(username)) return;
+  const text = String(m.text ?? '').slice(0, 5000).trim();
+  const files = (Array.isArray(m.files) ? m.files : []).map((f) => String(f).replace(/\s+/g, ' ').trim().slice(0, 120)).filter(Boolean).slice(0, 10);
+  const shownText = [text, ...files.map((f) => `[file: ${f}]`)].filter(Boolean).join(' ');
+  if (!shownText) return;
+  // Key on the text alone, as the toast and the list show it. A message with
+  // only files is "1 File" / "2 Files" in a toast: use the same.
+  const keyBody = text || `${files.length} ${files.length === 1 ? 'File' : 'Files'}`;
+  const displayName = String(m.displayName ?? '').replace(/\s+/g, ' ').trim().slice(0, 100) || username;
+  return handleIncoming({ source: 'thread', displayName, username, body: shownText, keyBody, shown: { kind: text ? 'text' : 'attachment', text: shownText }, messageId: id });
 }
 
 async function handleIncoming(m: Incoming): Promise<void> {
@@ -72,7 +120,7 @@ async function handleIncoming(m: Incoming): Promise<void> {
   const s = await getLocal();
   if (!s.settings.sendAlerts || !s.accountId) return;
 
-  const described = describeBody(m.body);
+  const described = m.shown ?? describeBody(m.body);
   // Some unread rows in the list have an empty preview: that is not an empty message.
   const body = described.kind === 'empty' && m.source === 'list' ? { ...described, text: 'New message (no preview in the inbox list). Check Fiverr.' } : described;
   if (body.kind === 'attachment' && !s.settings.attachmentAlerts) return;
@@ -83,9 +131,12 @@ async function handleIncoming(m: Incoming): Promise<void> {
   // Keyed on the username, so two buyers with the same display name stay apart.
   if (!m.username) m.username = s.knownUsers[senderKey(m.displayName)] ?? '';
   const sender = senderId(m.username, m.displayName);
-  const key = dedupeKey(s.accountId, sender, m.body);
+  const key = dedupeKey(s.accountId, sender, m.keyBody ?? m.body);
+  // The same message id from two tabs (both with the conversation open).
+  const idKey = m.messageId ? `${s.accountId}\u0000id\u0000${m.messageId}` : null;
+  if (idKey && !deduper.take(idKey, now, REPLAY_WINDOW_MS)) return;
   // A replayed toast is old news if this message was alerted in the last 2 hours.
-  if (!deduper.take(key, now, m.replay ? REPLAY_WINDOW_MS : DEDUPE_WINDOW_MS)) return;
+  if (!deduper.take(key, now, m.replay ? REPLAY_WINDOW_MS : (m.windowMs ?? DEDUPE_WINDOW_MS))) return;
   if (!senderGate.take(sender, m.source, body.kind === 'text', now)) return;
   void setSession({ dedupe: deduper.entries() });
 
@@ -107,6 +158,7 @@ async function handleIncoming(m: Incoming): Promise<void> {
     console.warn('[alert] send failed', err);
     // Let a copy of this message from another tab or detector try again.
     deduper.release(key, now);
+    if (idKey) deduper.release(idKey, now);
     void setSession({ dedupe: deduper.entries() });
     await remember({ ...recent, status: 'failed' });
   }

@@ -6,7 +6,7 @@ import { watchInboxList } from '../src/content/inboxWatcher';
 import { readRows } from '../src/content/reader';
 import { Deduper, dedupeKey, senderId } from '../src/lib/dedupe';
 import type { InboxRow, ListMessage } from '../src/lib/inboxRow';
-import { SAVED_STATE_MAX_AGE_MS, compareWithSaved, stateOf, usableSaved, type RowState } from '../src/lib/listState';
+import { SAVED_STATE_MAX_AGE_MS, compareWithSaved, isReadAtOnce, stateOf, toRowState, usableSaved, type RowState } from '../src/lib/listState';
 import { DEFAULT_SETTINGS, type LocalState } from '../src/lib/storage';
 
 // Fixtures are imported as text by Vite (`?raw`), no file system access needed
@@ -150,5 +150,42 @@ describe('Linked message', () => {
     expect(linkedText({ ...base, detectedUsername: 'my_seller' })).toContain('<b>my_seller</b>');
     expect(linkedText({ ...base, detectedUsername: 'my_seller', label: 'Main' })).toContain('<b>Main</b>');
     expect(labelSavedText('Main <2>')).toContain('<b>Main &lt;2&gt;</b>');
+  });
+});
+
+describe('item 4: a row read at once (new buyer preview, 0 unread)', () => {
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  const row = (o: Partial<InboxRow>): InboxRow => ({ username: 'some_buyer', name: 'Some Buyer', time: 'now', unread: 0, mine: false, typing: false, preview: 'old text', ...o });
+
+  it('the rule: buyer preview changed, 0 unread; not mine, typing, empty or unchanged', () => {
+    const prev = toRowState(row({}));
+    expect(isReadAtOnce(prev, row({ preview: 'new text' }))).toBe(true);
+    expect(isReadAtOnce(toRowState(row({ mine: true })), row({ preview: 'old text' }))).toBe(false); // same text
+    expect(isReadAtOnce(prev, row({ preview: 'new text', mine: true }))).toBe(false);
+    expect(isReadAtOnce(prev, row({ preview: 'Typing...', typing: true }))).toBe(false);
+    expect(isReadAtOnce(prev, row({ preview: '' }))).toBe(false);
+    expect(isReadAtOnce(prev, row({ preview: 'old text' }))).toBe(false);
+    expect(isReadAtOnce(prev, row({ preview: 'new text', unread: 1 }))).toBe(false); // the normal rule handles it
+  });
+
+  it('the live list alerts it as "read" only while this tab is hidden or unfocused', async () => {
+    for (const away of [true, false]) {
+      document.body.innerHTML = fixture('inbox-list.html');
+      const messages: ListMessage[] = [];
+      const stop = watchInboxList((m) => messages.push(m), { mayAlertRead: () => away });
+      // client_two: last message was mine; the buyer answers in the open conversation, read at once.
+      editRow(1, { preview: 'answer read at once', unread: 0 });
+      await flush();
+      expect(messages).toEqual(away ? [{ username: 'client_two', displayName: 'client_two', body: 'answer read at once', count: 1, read: true }] : []);
+      stop();
+    }
+  });
+
+  it('the after-reload compare includes it only when asked (short gap)', () => {
+    const saved = stateOf(rowsOfFixture());
+    editRow(1, { preview: 'answer read at once', unread: 0 });
+    const fresh = (readRows() as { value: InboxRow[] }).value;
+    expect(compareWithSaved(saved, fresh)).toEqual([]);
+    expect(compareWithSaved(saved, fresh, { readAtOnce: true })).toEqual([{ username: 'client_two', displayName: 'client_two', body: 'answer read at once', count: 1, read: true }]);
   });
 });

@@ -90,6 +90,8 @@ export interface ParsedMessage extends ConversationMessage {
   sender: string;
   /** The page shows "Me" as the sender name. */
   me: boolean;
+  /** The sender name in the message header ('' when grouped without one). */
+  name: string;
 }
 
 const UI_TEXT = new Set<string>(CONVERSATION_UI_TEXT);
@@ -130,6 +132,7 @@ export function parseMessage(el: Element): ParsedMessage | null {
     id: el.id,
     sender: avatarUsername(el.querySelector(CONVERSATION.sender)),
     me: name.toLowerCase() === 'me',
+    name,
     time: oneLine(time?.textContent),
     text: body,
     files,
@@ -151,6 +154,7 @@ export function parseConversation(root: ParentNode = document): ParsedMessage[] 
     if (!m.sender && last) {
       m.sender = last.sender;
       m.me = m.me || last.me;
+      m.name ||= last.name;
     }
     if (!m.time && last) m.time = last.time;
     out.push(m);

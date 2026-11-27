@@ -113,6 +113,8 @@ export interface SessionState {
   presence: PresenceAccount[];
   telegram: { lastError?: string; lastErrorAt?: number; lastOkAt?: number };
   dedupe: Array<[string, number]>;
+  /** Since when the watch tab has been hidden on a conversation (it returns to /inbox after 60 s). */
+  watchOffInboxSince?: number;
   /** Last time the watch tab was reloaded because its page looked stale. */
   lastStaleReloadAt?: number;
 }
