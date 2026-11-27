@@ -92,6 +92,28 @@ describe('thread detector alerts', () => {
   });
 });
 
+describe('thread alert: buyer time follows My time zone', () => {
+  // 00:30 UTC on Nov 16: Nov 16, 1:30 AM in Lagos; Nov 15, 7:30 PM for a buyer at UTC-5.
+  const NOW = Date.parse('2026-11-16T00:30:00Z');
+  const alertAt = async (myTimeZone: string, text: string, id: string) => {
+    state.local.settings = { ...DEFAULT_SETTINGS, myTimeZone };
+    state.local.buyerZones = { [buyer]: { offset: -300, at: NOW } };
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOW);
+    try {
+      await thread({ text, id });
+    } finally {
+      vi.useRealTimers();
+    }
+    return sent.at(-1)!.html.split('\n').at(-1);
+  };
+
+  it('the buyer\'s day is compared with my day in the selected zone, not the browser zone', async () => {
+    expect(await alertAt('Africa/Lagos', 'first', '00000000-0000-4000-8000-000000000000_c1aaaaaa-0000-1000-8000-000000000000')).toBe('Buyer time: Nov 15, 7:30 PM');
+    expect(await alertAt('America/Bogota', 'second', '00000000-0000-4000-8000-000000000000_c2aaaaaa-0000-1000-8000-000000000000')).toBe('Buyer time: 7:30 PM');
+  });
+});
+
 describe('list rows read at once (item 4)', () => {
   const read = (body: string) => handleListMessage({ username: buyer, displayName: 'Some Buyer', body, count: 1, read: true });
 
