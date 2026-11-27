@@ -13,6 +13,7 @@ import { buyerNowLine, formatBuyerAt, formatMine, messageSentAt, type BuyerZone 
 import { decodeCallback, encodeCallback, isCallbackForMe } from '../lib/callback';
 import { INBOX_URL, inboxUrlFor } from '../lib/constants';
 import { formatTime, truncate } from '../lib/format';
+import { lookupZone, myZone, zoneNote, zoneOffsetText, type MyZone } from '../lib/myZone';
 import type { ConversationMessage, InboxSnapshot, ListStatus } from '../lib/messages';
 import { getLocal, getSession, knownLabel, labelOf, patchSettings, setLocal, type LocalState, type PresenceAccount } from '../lib/storage';
 import { escapeHtml, setMyCommands, type BotCommand, type InlineKeyboard } from '../lib/telegram';
@@ -33,6 +34,7 @@ export const BOT_COMMANDS: BotCommand[] = [
   { command: 'status', description: 'Label, online state, unread count, last alert' },
   { command: 'pause', description: 'Pause alerts. /pause label: one account' },
   { command: 'resume', description: 'Resume alerts. /resume label: one account' },
+  { command: 'timezone', description: 'My time zone on all accounts: /timezone Africa/Lagos' },
   { command: 'help', description: 'Commands and examples' },
 ];
 
@@ -159,8 +161,8 @@ async function runCommand(s: LocalState, command: string, args: string, replyTo?
   const { presence } = await getSession();
   const myLabel = knownLabel(s);
 
-  // /full takes the buyer first, then the label.
-  let label = args;
+  // /full takes the buyer first, then the label. /timezone takes a zone, never a label.
+  let label = command === 'timezone' ? '' : args;
   let buyer = '';
   if (command === 'full') {
     const [first = '', ...rest] = args.split(/\s+/);
@@ -175,7 +177,8 @@ async function runCommand(s: LocalState, command: string, args: string, replyTo?
     if (command === 'help' || !KNOWN.has(command)) return void (await notify(helpText(validLabels(myLabel, myId, presence))));
     if (target.kind === 'unknown') return void (await notify(unknownLabelText(label, validLabels(myLabel, myId, presence)), { replyTo }));
     if (target.kind === 'other' && !target.account.online) {
-      await notify(`<b>${escapeHtml(target.account.label)}</b> is offline (last seen ${escapeHtml(formatTime(target.account.lastSeen))}). Open Chrome on that profile.`, { replyTo });
+      const z = myZone(s.settings);
+      await notify(`<b>${escapeHtml(target.account.label)}</b> is offline (last seen ${escapeHtml(seenText(target.account.lastSeen, z))}). Open Chrome on that profile.`, { replyTo });
     }
     return;
   }
@@ -186,6 +189,8 @@ async function runCommand(s: LocalState, command: string, args: string, replyTo?
       return replyCheck(s, replyTo);
     case 'status':
       return replyStatus(s, target.kind === 'all');
+    case 'timezone':
+      return replyTimezone(s, args, replyTo);
     case 'pause':
     case 'resume': {
       const on = command === 'resume';
@@ -208,7 +213,7 @@ async function runCommand(s: LocalState, command: string, args: string, replyTo?
   }
 }
 
-const KNOWN = new Set(['check', 'status', 'pause', 'resume', 'full', 'help']);
+const KNOWN = new Set(['check', 'status', 'pause', 'resume', 'full', 'timezone', 'help']);
 const FULL_USAGE = 'Usage: <code>/full username</code> or <code>/full username label</code>, for example <code>/full @some_buyer</code>.';
 
 /** The buyer has a row in this account's saved inbox list. */
@@ -226,6 +231,8 @@ export function helpText(labels: string[]): string {
     `/full @some_buyer ${escapeHtml(ex)}: from that buyer on ${escapeHtml(ex)} only`,
     '/status: label, online state, unread count and last alert of each account',
     `/pause, /resume: stop or start alerts on all accounts; /pause ${escapeHtml(ex)}: one account`,
+    '/timezone Africa/Lagos: show all times in that zone, on every account at once ("/timezone Lagos" works too)',
+    '/timezone: the time zone each account uses now',
     '/help: this list',
     labels.length ? `Accounts: ${labels.map((l) => `<code>${escapeHtml(l)}</code>`).join(', ')}. Labels match without case.` : 'Labels match without case.',
     'Buttons under an alert work only while the relay is online.',
@@ -347,13 +354,14 @@ async function replyCheck(s: LocalState, replyTo?: number) {
  * One line per message, oldest first:
  * "<i>Nov 16, 10:53 AM (buyer 9:53 AM)</i>: text [file: name]".
  *
- * My time comes from the message id (a time-based UUID), shown in this
- * computer's zone. The buyer's time is the same moment at the buyer's
- * offset, with their day when it differs from mine, and "?" when the offset
+ * My time comes from the message id (a time-based UUID), shown in
+ * `timeZone` (My time zone, never the browser's default). The buyer's time
+ * is the same moment at the buyer's offset, with their day when it differs
+ * from mine, and "?" when the offset
  * is over 30 days old. If the id gives no time, the page's text is shown and
  * marked as the Fiverr account's zone. Files are named, never sent.
  */
-export function formatConversation(messages: ConversationMessage[], zone: BuyerZone | null = null, now = Date.now(), timeZone?: string): string {
+export function formatConversation(messages: ConversationMessage[], zone: BuyerZone | null, timeZone: string, now = Date.now()): string {
   if (!messages.length) return 'No messages from the buyer found.';
   return messages
     .map((m) => {
@@ -367,10 +375,18 @@ export function formatConversation(messages: ConversationMessage[], zone: BuyerZ
     .join('\n');
 }
 
+/**
+ * "Times: Africa/Lagos. Buyer local time now: 6:07 PM (UTC+0, United Kingdom)".
+ * Without the setting: "Times: America/Bogota (browser zone, not set: send /timezone Your/Zone)."
+ */
+export function timesLine(mine: MyZone, zone: BuyerZone | null, now: number): string {
+  const times = mine.set ? `Times: ${mine.zone}.` : `Times: ${mine.zone} (browser zone, not set: send /timezone Your/Zone).`;
+  return zone ? `${times} ${buyerNowLine(zone, now, mine.zone)}` : times;
+}
+
 /** The whole "Full message" reply, kept under Telegram's 4096 limit by dropping the oldest lines. */
-export function fullReplyText(label: string, username: string, body: string, zone: BuyerZone | null, now = Date.now(), timeZone?: string): string {
-  const top = [`<b>${escapeHtml(label)}</b>: last messages from <b>@${escapeHtml(username)}</b>`];
-  if (zone) top.push(escapeHtml(buyerNowLine(zone, now, timeZone)));
+export function fullReplyText(label: string, username: string, body: string, zone: BuyerZone | null, mine: MyZone, now = Date.now()): string {
+  const top = [`<b>${escapeHtml(label)}</b>: last messages from <b>@${escapeHtml(username)}</b>`, escapeHtml(timesLine(mine, zone, now))];
   const header = top.join('\n');
   const footer = '\n\n<i>Opening the conversation marked it as read on Fiverr.</i>';
   // Drop whole lines, so an HTML tag is never cut.
@@ -382,6 +398,7 @@ export function fullReplyText(label: string, username: string, body: string, zon
 async function replyFull(s: LocalState, username: string, replyTo?: number) {
   let body: string;
   let zone: BuyerZone | null = null;
+  const mine = myZone(s.settings);
   try {
     const res = await readConversation(username, 10);
     if (res.ok) {
@@ -389,14 +406,14 @@ async function replyFull(s: LocalState, username: string, replyTo?: number) {
       // entry (it keeps a country seen earlier).
       await saveBuyerZone(res.value.header);
       zone = zoneFor(await getLocal(), username);
-      body = formatConversation(res.value.messages, zone);
+      body = formatConversation(res.value.messages, zone, mine.zone);
     } else {
       body = missingNote('The conversation', 'is', res.missing, res.error);
     }
   } catch (err) {
     body = `Could not read the conversation. ${escapeHtml(String((err as Error).message ?? err))}`;
   }
-  const html = fullReplyText(labelOf(s), username, body, zone);
+  const html = fullReplyText(labelOf(s), username, body, zone, mine);
   await notify(html, { replyTo, keyboard: checkKeyboard(s.accountId!, { text: 'Open conversation', url: inboxUrlFor(username) }) });
 }
 
@@ -410,23 +427,74 @@ async function unreadNow(s: LocalState): Promise<{ n: number | null; live: boole
   return { n: s.lastUnread ?? null, live: false };
 }
 
-/** "<b>Main</b>: online, alerts on, 2 unread, last alert 10:04" */
-export function statusLine(label: string, alertsOn: boolean, unread: { n: number | null; live: boolean }, lastAlertAt: number | undefined, now = Date.now()): string {
+/** "6:52 PM (Africa/Lagos)", "never". The zone is named, so each line says which zone it is in. */
+export function seenText(ts: number | undefined, mine: MyZone, now = Date.now()): string {
+  return ts ? `${formatTime(ts, now, mine.zone)} (${zoneNote(mine)})` : 'never';
+}
+
+/** "<b>Main</b>: online, alerts on, 2 unread, last alert 6:52 PM (Africa/Lagos)" */
+export function statusLine(label: string, alertsOn: boolean, unread: { n: number | null; live: boolean }, lastAlertAt: number | undefined, mine: MyZone, now = Date.now()): string {
   const u = unread.n === null ? 'unread count unknown' : `${unread.n} unread${unread.live ? '' : ' (at the last reload)'}`;
-  return `<b>${escapeHtml(label)}</b>: online, alerts ${alertsOn ? 'on' : 'paused'}, ${u}, last alert ${escapeHtml(formatTime(lastAlertAt, now))}`;
+  return `<b>${escapeHtml(label)}</b>: online, alerts ${alertsOn ? 'on' : 'paused'}, ${u}, last alert ${escapeHtml(seenText(lastAlertAt, mine, now))}`;
 }
 
 async function replyStatus(s: LocalState, includeOthers: boolean) {
-  const lines = [statusLine(labelOf(s), s.settings.sendAlerts, await unreadNow(s), s.lastAlertAt)];
+  const mine = myZone(s.settings);
+  const lines = [statusLine(labelOf(s), s.settings.sendAlerts, await unreadNow(s), s.lastAlertAt, mine)];
   // Offline accounts cannot answer: the leader lists them.
   if (includeOthers && (await isLeader(s.accountId!))) {
     const { presence } = await getSession();
     for (const a of presence.filter((a) => !a.online && a.accountId !== s.accountId)) {
-      lines.push(`<b>${escapeHtml(a.label || a.accountId)}</b>: offline since ${escapeHtml(formatTime(a.lastSeen))}`);
+      lines.push(`<b>${escapeHtml(a.label || a.accountId)}</b>: offline since ${escapeHtml(seenText(a.lastSeen, mine))}`);
     }
   }
   if (!isRelayOpen()) lines.push('<i>Relay connection is down.</i>');
   await notify(lines.join('\n'));
+}
+
+/** "<b>Main</b>: Africa/Lagos (now 6:52 PM, UTC+1)" or the not-set form, for /timezone. */
+export function zoneStatusText(label: string, mine: MyZone, now = Date.now()): string {
+  const clock = `now ${formatTime(now, now, mine.zone)}, ${zoneOffsetText(now, mine.zone)}`;
+  return mine.set
+    ? `<b>${escapeHtml(label)}</b>: ${escapeHtml(mine.zone)} (${escapeHtml(clock)})`
+    : `<b>${escapeHtml(label)}</b>: not set. Using the browser zone ${escapeHtml(mine.zone)} (${escapeHtml(clock)}), which an anti-detect profile may fake. Send <code>/timezone Africa/Lagos</code> with your zone.`;
+}
+
+export function zoneUnknownText(input: string, matches: string[]): string {
+  if (matches.length) {
+    return `<b>${escapeHtml(input)}</b> matches several zones: ${matches.map((m) => `<code>${escapeHtml(m)}</code>`).join(', ')}. Send the full name, for example <code>/timezone ${escapeHtml(matches[0]!)}</code>.`;
+  }
+  return `<b>${escapeHtml(input)}</b> is not a time zone. Use an IANA name such as <code>/timezone Africa/Lagos</code> or <code>/timezone Europe/London</code>.`;
+}
+
+/**
+ * "/timezone": every online profile reports its zone. "/timezone Africa/Lagos":
+ * every online profile saves it and confirms. Each profile resolves the name
+ * itself; a name it cannot use gets one error reply, from the leader. The
+ * leader also names offline profiles, which miss the change.
+ */
+async function replyTimezone(s: LocalState, input: string, replyTo?: number) {
+  const label = labelOf(s);
+  const leader = await isLeader(s.accountId!);
+  const lines: string[] = [];
+  if (!input) {
+    lines.push(zoneStatusText(label, myZone(s.settings)));
+  } else {
+    const found = lookupZone(input);
+    if (!found.ok) {
+      if (leader) await notify(zoneUnknownText(input, found.matches), { replyTo });
+      return;
+    }
+    await patchSettings({ myTimeZone: found.zone });
+    lines.push(`<b>${escapeHtml(label)}</b>: times now shown in ${escapeHtml(found.zone)} (now ${escapeHtml(formatTime(Date.now(), Date.now(), found.zone))}, ${escapeHtml(zoneOffsetText(Date.now(), found.zone))}).`);
+  }
+  if (leader) {
+    const { presence } = await getSession();
+    for (const a of presence.filter((a) => !a.online && a.accountId !== s.accountId)) {
+      lines.push(`<b>${escapeHtml(a.label || a.accountId)}</b>: offline, ${input ? 'did not get the change. Send /timezone again when it is online.' : 'cannot answer.'}`);
+    }
+  }
+  await notify(lines.join('\n'), { replyTo });
 }
 
 /** The relay says another account has updates waiting and no open socket. */

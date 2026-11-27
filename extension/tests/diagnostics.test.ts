@@ -153,9 +153,9 @@ describe('log storage and format', () => {
   });
 
   it('formats one line per entry with the watch-tab marker', () => {
-    const text = formatDiagnosticsLog([{ ...entry(0), tab: 7, watch: true }], { version: '0.1.0', userAgent: 'UA', watchTabId: 7, now: 0 });
+    const text = formatDiagnosticsLog([{ ...entry(0), tab: 7, watch: true }], { version: '0.1.0', userAgent: 'UA', watchTabId: 7, now: 0, zone: { zone: 'UTC', set: true } });
     const lines = text.split('\n');
     expect(lines[0]).toMatch(/background diagnostics/);
-    expect(lines.at(-1)).toBe('1970-01-01T00:00:00.000Z | hidden | nofocus | 7W | /inbox | title | {"now":"0"}');
+    expect(lines.at(-1)).toBe('1970-01-01 00:00:00.000 +00:00 | hidden | nofocus | 7W | /inbox | title | {"now":"0"}');
   });
 });

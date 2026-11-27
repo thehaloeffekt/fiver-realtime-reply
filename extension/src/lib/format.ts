@@ -1,3 +1,4 @@
+import { formatMineShort } from './buyerTime';
 import { encodeCallback } from './callback';
 import { INBOX_URL, MAX_BODY_CHARS, inboxUrlFor } from './constants';
 import { escapeHtml, type InlineKeyboard } from './telegram';
@@ -36,15 +37,14 @@ export function formatAlert(label: string, toast: Pick<Toast, 'username' | 'disp
   return { html, keyboard };
 }
 
-export function formatTime(ts: number | undefined, now = Date.now()): string {
+/** "6:52 PM" today, else "Nov 16, 6:52 PM", in `timeZone` (My time zone). "never" without a time. */
+export function formatTime(ts: number | undefined, now: number, timeZone: string): string {
   if (!ts) return 'never';
-  const d = new Date(ts);
-  const sameDay = new Date(now).toDateString() === d.toDateString();
-  const hm = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  return sameDay ? hm : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${hm}`;
+  return formatMineShort(ts, now, timeZone);
 }
 
-export function formatAgo(ts: number | undefined, now = Date.now()): string {
+/** "just now", "5 min ago", "3 h ago"; after a day the time itself, in `timeZone`. */
+export function formatAgo(ts: number | undefined, now: number, timeZone: string): string {
   if (!ts) return 'never';
   const s = Math.max(0, Math.round((now - ts) / 1000));
   if (s < 60) return 'just now';
@@ -52,5 +52,5 @@ export function formatAgo(ts: number | undefined, now = Date.now()): string {
   if (m < 60) return `${m} min ago`;
   const h = Math.round(m / 60);
   if (h < 24) return `${h} h ago`;
-  return formatTime(ts, now);
+  return formatTime(ts, now, timeZone);
 }

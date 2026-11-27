@@ -166,7 +166,7 @@ describe('conversation capture', () => {
     // The account's zone was UTC-5: the time from each message id, shown in
     // that zone, is exactly the time the page showed. So the ids carry the
     // real send time.
-    expect(formatConversation(last, null, Date.UTC(2026, 10, 16, 3), 'America/New_York').split('\n')).toEqual([
+    expect(formatConversation(last, null, 'America/New_York', Date.UTC(2026, 10, 16, 3)).split('\n')).toEqual([
       "<i>Nov 14, 4:20 PM</i>: Hello, how is the work going",
       '<i>Nov 14, 4:32 PM</i>: Checking in once more',
       '<i>Nov 14, 4:34 PM</i>: Did the site files make sense',

@@ -59,6 +59,12 @@ export interface Settings {
   debug: boolean;
   reloadMinMinutes: number;
   reloadMaxMinutes: number;
+  /**
+   * IANA zone that times are shown in ("Africa/Lagos"). Empty: the browser's
+   * zone, marked "not set". A setting because an anti-detect browser reports
+   * the profile's configured zone, not the computer's. See myZone.ts.
+   */
+  myTimeZone: string;
 }
 
 export interface RecentAlert {
@@ -84,6 +90,7 @@ export const DEFAULT_SETTINGS: Settings = {
   debug: false,
   reloadMinMinutes: 25,
   reloadMaxMinutes: 35,
+  myTimeZone: '',
 };
 
 const LOCAL_DEFAULTS: LocalState = {

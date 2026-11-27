@@ -1,4 +1,3 @@
-import { formatAgo } from '../lib/format';
 import { isConfigured, type LocalState, type SessionState } from '../lib/storage';
 import type { Tone } from './components';
 import { minutesUntil } from './hooks';
@@ -59,5 +58,3 @@ export function topProblem(l: LocalState, s: SessionState): Problem | null {
   }
   return null;
 }
-
-export const lastSeenText = (ts: number | undefined, now: number) => formatAgo(ts, now);

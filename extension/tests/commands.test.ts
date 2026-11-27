@@ -38,7 +38,7 @@ vi.mock('../src/background/watchTab', () => ({
   readConversation: vi.fn(async () => watch.conversation),
 }));
 
-const { BOT_COMMANDS, handleUpdate, helpText, parseCommand, pauseText, registerCommands, resolveTarget, statusLine, unknownLabelText, validLabels } = await import('../src/background/commands');
+const { BOT_COMMANDS, handleUpdate, helpText, parseCommand, pauseText, registerCommands, resolveTarget, unknownLabelText, validLabels } = await import('../src/background/commands');
 const { DEFAULT_SETTINGS } = await import('../src/lib/storage');
 const { readConversation } = await import('../src/background/watchTab');
 
@@ -100,7 +100,7 @@ describe('parsing and labels', () => {
   });
 
   it('the "/" menu list is valid for Telegram', () => {
-    expect(BOT_COMMANDS.map((c) => c.command)).toEqual(['check', 'full', 'status', 'pause', 'resume', 'help']);
+    expect(BOT_COMMANDS.map((c) => c.command)).toEqual(['check', 'full', 'status', 'pause', 'resume', 'timezone', 'help']);
     for (const c of BOT_COMMANDS) {
       expect(c.command).toMatch(/^[a-z0-9_]{1,32}$/);
       expect(c.description.length).toBeGreaterThan(2);
@@ -167,13 +167,13 @@ describe('/full', () => {
   });
 
   it('accepts the username with "@" and any case; answers with times, the buyer line and both buttons', async () => {
-    asMain();
+    asMain(BOTH, { settings: { ...DEFAULT_SETTINGS, myTimeZone: 'Europe/London' } });
     watch.conversation = read();
     await say('/full @Some_Buyer');
     expect(readConversation).toHaveBeenCalledWith('Some_Buyer', 10);
     const lines = sent[0]!.html.split('\n');
     expect(lines[0]).toBe('<b>Main</b>: last messages from <b>@Some_Buyer</b>');
-    expect(lines[1]).toMatch(/^Buyer local time now: \d{1,2}:\d\d [AP]M \(UTC\+0, Some Country\)$/);
+    expect(lines[1]).toMatch(/^Times: Europe\/London\. Buyer local time now: \d{1,2}:\d\d [AP]M \(UTC\+0, Some Country\)$/);
     expect(lines[2]).toBe('<i>Nov 16, 4:53 AM (Fiverr account time)</i>: hello [file: plan.pdf]');
     expect(sent[0]!.opts?.keyboard).toEqual([[{ text: 'Open conversation', url: 'https://www.fiverr.com/inbox/Some_Buyer' }, { text: 'Check now', callback_data: 'c|acc-a|check|' }]]);
     // The header reading was saved for later alerts.
@@ -211,7 +211,7 @@ describe('/full', () => {
     asMain(BOTH, { buyerZones: { some_buyer: zone } });
     watch.conversation = { ok: true, value: { messages: [], header: null } };
     await say('/full some_buyer');
-    expect(sent[0]!.html.split('\n')[1]).toMatch(/^Buyer local time now: .* \(UTC\+0\)$/);
+    expect(sent[0]!.html.split('\n')[1]).toMatch(/^Times: .+\. Buyer local time now: .* \(UTC\+0\)$/);
   });
 });
 
@@ -219,7 +219,6 @@ describe('/status', () => {
   it('each account: label, online, alerts state, live unread count, last alert', async () => {
     asSecond();
     await say('/status');
-    expect(sent[0]!.html).toBe(statusLine('Second', true, { n: 3, live: true }, undefined));
     expect(sent[0]!.html).toBe('<b>Second</b>: online, alerts on, 3 unread, last alert never');
   });
 
@@ -230,6 +229,67 @@ describe('/status', () => {
     const lines = sent[0]!.html.split('\n');
     expect(lines[0]).toBe('<b>Main</b>: online, alerts on, 2 unread (at the last reload), last alert never');
     expect(lines[1]).toMatch(/^<b>Third<\/b>: offline since /);
+  });
+});
+
+describe('/timezone', () => {
+  it('sets the zone on every account in one step; a short form is accepted', async () => {
+    asSecond();
+    await say('/timezone Lagos');
+    expect(state.local.settings.myTimeZone).toBe('Africa/Lagos');
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.html).toMatch(/^<b>Second<\/b>: times now shown in Africa\/Lagos \(now \d{1,2}:\d\d [AP]M, UTC\+1\)\.$/);
+    asMain();
+    await say('/timezone@MyBot Africa/Lagos');
+    expect(state.local.settings.myTimeZone).toBe('Africa/Lagos');
+    expect(sent[0]!.html).toContain('<b>Main</b>: times now shown in Africa/Lagos');
+  });
+
+  it('the zone is never read as a label', async () => {
+    asMain();
+    await say('/timezone Europe/London');
+    expect(sent.map((m) => m.html).join('\n')).not.toContain('No account is named');
+    expect(state.local.settings.myTimeZone).toBe('Europe/London');
+  });
+
+  it('the leader names offline accounts, which miss the change', async () => {
+    asMain(presence(['acc-a', 'Main', true], ['acc-c', 'Third', false]));
+    await say('/timezone Lagos');
+    expect(sent[0]!.html.split('\n')[1]).toBe('<b>Third</b>: offline, did not get the change. Send /timezone again when it is online.');
+  });
+
+  it('an unknown or ambiguous zone: one reply from the leader, nothing saved', async () => {
+    asMain();
+    await say('/timezone Nowhere');
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.html).toContain('is not a time zone');
+    expect(state.local.settings.myTimeZone).toBe('');
+    asSecond();
+    await say('/timezone Nowhere');
+    expect(sent).toHaveLength(0);
+    expect(state.local.settings.myTimeZone).toBe('');
+  });
+
+  it('without a zone: each account shows the zone it uses', async () => {
+    asSecond();
+    await say('/timezone');
+    expect(sent[0]!.html).toMatch(/^<b>Second<\/b>: not set\. Using the browser zone /);
+    asSecond(BOTH, { settings: { ...DEFAULT_SETTINGS, myTimeZone: 'Africa/Lagos' } });
+    await say('/timezone');
+    expect(sent[0]!.html).toMatch(/^<b>Second<\/b>: Africa\/Lagos \(now \d{1,2}:\d\d [AP]M, UTC\+1\)$/);
+  });
+
+  it('Full message and /status use the saved zone', async () => {
+    asMain(BOTH, { settings: { ...DEFAULT_SETTINGS, myTimeZone: 'Africa/Lagos' }, lastAlertAt: Date.now() });
+    watch.conversation = { ok: true, value: { messages: [], header: null } };
+    await say('/full some_buyer');
+    expect(sent[0]!.html.split('\n')[1]).toBe('Times: Africa/Lagos.');
+    await say('/status');
+    expect(sent[1]!.html.split('\n')[0]).toMatch(/last alert \d{1,2}:\d\d [AP]M \(Africa\/Lagos\)$/);
+  });
+
+  it('is in /help', () => {
+    expect(helpText(['Main'])).toContain('/timezone Africa/Lagos');
   });
 });
 

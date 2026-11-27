@@ -4,7 +4,7 @@
  * A Fiverr conversation page shows three time zones at once:
  * - message times ("Nov 16, 4:53 AM") are in the Fiverr account's zone,
  * - the conversation header shows the buyer's local time now ("9:59 AM (local time)"),
- * - this computer has its own zone.
+ * - the user has their own zone ("My time zone", see myZone.ts).
  *
  * Message times here come from the message id instead: its second half is a
  * version-1 UUID, which holds the moment the message was created. That is an
@@ -101,7 +101,8 @@ interface Parts {
   mi: number;
 }
 
-function partsIn(ts: number, timeZone?: string): Parts {
+/** Date and time parts of `ts` in an explicit zone (never the default local zone). */
+function partsIn(ts: number, timeZone: string): Parts {
   const f = new Intl.DateTimeFormat('en-US', { timeZone, year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', hourCycle: 'h23' });
   const p: Record<string, string> = {};
   for (const x of f.formatToParts(new Date(ts))) p[x.type] = x.value;
@@ -115,24 +116,32 @@ const clock = (p: Parts) => `${p.h % 12 || 12}:${pad(p.mi)} ${p.h < 12 ? 'AM' : 
 const day = (p: Parts) => `${MONTHS[p.mo - 1]} ${p.d}`;
 const sameDay = (a: Parts, b: Parts) => a.y === b.y && a.mo === b.mo && a.d === b.d;
 
-/** "Nov 16, 10:53 AM" in this computer's zone (or `timeZone`, for tests). */
-export function formatMine(ts: number, timeZone?: string): string {
+/** "Nov 16, 10:53 AM" in `timeZone` (My time zone). */
+export function formatMine(ts: number, timeZone: string): string {
   const p = partsIn(ts, timeZone);
   return `${day(p)}, ${clock(p)}`;
 }
 
+/** "10:53 AM" when `ts` is on the same day as `now` in `timeZone`, else "Nov 16, 10:53 AM". */
+export function formatMineShort(ts: number, now: number, timeZone: string): string {
+  const p = partsIn(ts, timeZone);
+  return sameDay(p, partsIn(now, timeZone)) ? clock(p) : `${day(p)}, ${clock(p)}`;
+}
+
 /**
  * The buyer's time for a moment: "9:53 AM", or "Nov 15, 9:53 PM" when the
- * buyer's date differs from mine. A "?" follows when the offset is old.
+ * buyer's date differs from mine (my date in `timeZone`). A "?" follows when
+ * the offset is old. The buyer's side never uses a zone name: it is the
+ * moment shifted by the saved offset and read as UTC.
  */
-export function formatBuyerAt(ts: number, zone: BuyerZone, now: number, timeZone?: string): string {
+export function formatBuyerAt(ts: number, zone: BuyerZone, now: number, timeZone: string): string {
   const b = partsAtOffset(ts, zone.offset);
   const text = sameDay(b, partsIn(ts, timeZone)) ? clock(b) : `${day(b)}, ${clock(b)}`;
   return isStaleZone(zone, now) ? `${text}?` : text;
 }
 
 /** "Buyer local time now: 9:54 AM (UTC+0, United Kingdom)" */
-export function buyerNowLine(zone: BuyerZone, now: number, timeZone?: string): string {
+export function buyerNowLine(zone: BuyerZone, now: number, timeZone: string): string {
   const inside = [formatOffset(zone.offset), zone.country].filter(Boolean).join(', ');
   return `Buyer local time now: ${formatBuyerAt(now, zone, now, timeZone)} (${inside})`;
 }

@@ -3,6 +3,7 @@
  * does while it is hidden, so we can see which signals still fire there.
  * Pure helpers live here; the recorder itself is src/content/diagnostics.ts.
  */
+import { zoneNote, zoneOffsetAt, type MyZone } from './myZone';
 
 export const DIAG_MAX_ENTRIES = 300;
 /** outerHTML snippets are cut to this length. */
@@ -92,12 +93,28 @@ export function sanitizeEntries(input: unknown): DiagEntry[] {
   return out;
 }
 
+/**
+ * "2026-11-16 18:52:03.120 +01:00": wall time in `timeZone` (My time zone)
+ * with its offset, so a line reads in the user's own time and still pins one
+ * exact moment.
+ */
+export function logTime(ts: number, timeZone: string): string {
+  const offset = zoneOffsetAt(ts, timeZone);
+  const d = new Date(ts + offset * 60_000); // read as UTC: the wall time in timeZone
+  const pad = (n: number, w = 2) => String(n).padStart(w, '0');
+  const abs = Math.abs(offset);
+  const off = `${offset < 0 ? '-' : '+'}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}.${pad(d.getUTCMilliseconds(), 3)} ${off}`;
+}
+
 /** The text that "Copy diagnostics log" puts on the clipboard: a header, then one line per entry. */
-export function formatDiagnosticsLog(entries: DiagEntry[], meta: { version: string; userAgent: string; watchTabId?: number; now?: number }): string {
+export function formatDiagnosticsLog(entries: DiagEntry[], meta: { version: string; userAgent: string; watchTabId?: number; now?: number; zone: MyZone }): string {
   const now = meta.now ?? Date.now();
+  const tz = meta.zone.zone;
   const header = [
     `# Fiverr Telegram Alerts background diagnostics`,
-    `# copied ${new Date(now).toISOString()} · extension ${meta.version} · ${entries.length} entries`,
+    `# copied ${logTime(now, tz)} · extension ${meta.version} · ${entries.length} entries`,
+    `# times: ${zoneNote(meta.zone)}`,
     `# ${meta.userAgent}`,
     `# watch tab id: ${meta.watchTabId ?? 'none'}`,
     `# columns: time | visibility | focus | tab (W = watch tab) | path | kind | data`,
@@ -105,7 +122,7 @@ export function formatDiagnosticsLog(entries: DiagEntry[], meta: { version: stri
   const lines = entries.map((e) => {
     const tab = e.tab == null ? '-' : `${e.tab}${e.watch ? 'W' : ''}`;
     const data = e.data ? JSON.stringify(e.data) : '';
-    return [new Date(e.t).toISOString(), e.vis, e.focus ? 'focus' : 'nofocus', tab, e.path, e.kind, data].join(' | ');
+    return [logTime(e.t, tz), e.vis, e.focus ? 'focus' : 'nofocus', tab, e.path, e.kind, data].join(' | ');
   });
   return [...header, ...lines].join('\n');
 }

@@ -2,7 +2,9 @@ import { useState } from 'react';
 import { browser } from 'wxt/browser';
 import { FIVERR_ORIGIN } from '../../lib/constants';
 import { formatDiagnosticsLog } from '../../lib/diagnostics';
+import { formatMine } from '../../lib/buyerTime';
 import { formatAgo } from '../../lib/format';
+import { myZone, zoneNote, type MyZone } from '../../lib/myZone';
 import type { InboxSnapshot } from '../../lib/messages';
 import { CAPTURE_TARGETS, type CaptureKind } from '../../lib/selectors';
 import { isConfigured, labelOf, type LocalState, type RecentAlert, type SessionState } from '../../lib/storage';
@@ -90,6 +92,7 @@ function Main({ local, session }: { local: LocalState; session: SessionState }) 
   const [checkResult, setCheckResult] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
   const problem = topProblem(local, session);
+  const mine = myZone(local.settings);
 
   const checkNow = async () => {
     setChecking(true);
@@ -157,15 +160,23 @@ function Main({ local, session }: { local: LocalState; session: SessionState }) 
 
         <section className="card card-pad">
           <h2 className="card-title">Recent alerts</h2>
+          {!mine.set && (
+            <div className="small muted" style={{ marginBottom: 6 }}>
+              Times in {mine.zone} (browser zone, not set).{' '}
+              <button className="link-btn small" onClick={openSettings}>
+                Set My time zone
+              </button>
+            </div>
+          )}
           {local.recentAlerts.length === 0 ? (
             <div className="small muted">No alerts yet. New Fiverr messages show up here.</div>
           ) : (
-            local.recentAlerts.slice(0, 8).map((a) => <AlertRow key={`${a.at}-${a.displayName}`} alert={a} now={now} />)
+            local.recentAlerts.slice(0, 8).map((a) => <AlertRow key={`${a.at}-${a.displayName}`} alert={a} now={now} mine={mine} />)
           )}
         </section>
 
-        {local.settings.debug && <Diagnostics local={local} session={session} />}
-        {local.settings.debug && <DebugCapture local={local} />}
+        {local.settings.debug && <Diagnostics local={local} session={session} mine={mine} />}
+        {local.settings.debug && <DebugCapture local={local} mine={mine} />}
       </div>
 
       <footer className="popup-footer">
@@ -180,7 +191,7 @@ function Main({ local, session }: { local: LocalState; session: SessionState }) 
   );
 }
 
-function AlertRow({ alert, now }: { alert: RecentAlert; now: number }) {
+function AlertRow({ alert, now, mine }: { alert: RecentAlert; now: number; mine: MyZone }) {
   return (
     <div className="alert-item">
       <div className="avatar" aria-hidden>
@@ -190,7 +201,9 @@ function AlertRow({ alert, now }: { alert: RecentAlert; now: number }) {
         <div className="row" style={{ gap: 6 }}>
           <span className="strong ellipsis">{alert.displayName}</span>
           <span className="small muted ellipsis grow">{alert.username ? `@${alert.username}` : ''}</span>
-          <span className="small muted">{formatAgo(alert.at, now)}</span>
+          <span className="small muted" title={`${formatMine(alert.at, mine.zone)} (${zoneNote(mine)})`}>
+            {formatAgo(alert.at, now, mine.zone)}
+          </span>
         </div>
         <div className="row" style={{ gap: 6 }}>
           <span className="small ellipsis grow" style={{ color: 'var(--text-2)' }}>
@@ -219,7 +232,7 @@ function describeSnapshot(s: InboxSnapshot): string {
 }
 
 /** Debug mode: collect HTML samples when Fiverr changes its markup. */
-function DebugCapture({ local }: { local: LocalState }) {
+function DebugCapture({ local, mine }: { local: LocalState; mine: MyZone }) {
   const [hint, setHint] = useState<string | null>(null);
   const [copied, setCopied] = useState<CaptureKind | null>(null);
 
@@ -259,7 +272,7 @@ function DebugCapture({ local }: { local: LocalState }) {
             <div className="grow">
               <div className="strong small">{t.title}</div>
               <div className="small muted ellipsis" title={t.where}>
-                {saved ? `Saved ${formatAgo(saved.at)} · ${(saved.html.length / 1024).toFixed(1)} KB` : t.where}
+                {saved ? `Saved ${formatAgo(saved.at, Date.now(), mine.zone)} · ${(saved.html.length / 1024).toFixed(1)} KB` : t.where}
               </div>
             </div>
             {saved && (
@@ -279,7 +292,7 @@ function DebugCapture({ local }: { local: LocalState }) {
 }
 
 /** Debug mode: the background diagnostics log recorded on Fiverr pages. */
-function Diagnostics({ local, session }: { local: LocalState; session: SessionState }) {
+function Diagnostics({ local, session, mine }: { local: LocalState; session: SessionState; mine: MyZone }) {
   const [copied, setCopied] = useState(false);
   const entries = local.diagnostics;
   const last = entries[entries.length - 1];
@@ -290,6 +303,7 @@ function Diagnostics({ local, session }: { local: LocalState; session: SessionSt
       version: browser.runtime.getManifest().version,
       userAgent: navigator.userAgent,
       watchTabId: session.watchTabId,
+      zone: mine,
     });
     await navigator.clipboard.writeText(text);
     setCopied(true);
@@ -305,7 +319,7 @@ function Diagnostics({ local, session }: { local: LocalState; session: SessionSt
       <div className="small" style={{ margin: '8px 0' }}>
         {entries.length === 0
           ? 'No entries yet. Reload your Fiverr tabs once after turning on debug mode.'
-          : `${entries.length} of 300 entries · last ${formatAgo(last!.t)} · ${hiddenWatch} page changes in the hidden watch tab`}
+          : `${entries.length} of 300 entries · last ${formatAgo(last!.t, Date.now(), mine.zone)} · ${hiddenWatch} page changes in the hidden watch tab`}
       </div>
       <div className="row" style={{ gap: 8 }}>
         <button className="btn btn-sm btn-primary" onClick={() => void copy()} disabled={entries.length === 0}>

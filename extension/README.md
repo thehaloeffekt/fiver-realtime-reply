@@ -191,16 +191,28 @@ body. The reply has **Open conversation** and **Check now** buttons.
 
 **Message times: my time and the buyer's time** (`src/lib/buyerTime.ts`). A
 conversation page shows three zones: message times are in the Fiverr
-account's zone, the header shows the buyer's local time, and the computer has
-its own. The extension does not parse the message time text. The second half of
+account's zone, the header shows the buyer's local time, and you have your
+own (**My time zone**, below). The extension does not parse the message time text. The second half of
 each message id (`{conversation}_{message}`) is a version-1 UUID, which holds
 the moment the message was created; shown in the account's zone it gives
 exactly the time the page shows (tested on the capture). That instant is shown
-in this computer's zone, and at the buyer's offset:
-`Nov 16, 10:53 AM (buyer 9:53 AM): text`, with the buyer's day added when it
+in My time zone, and at the buyer's offset:
+`Nov 16, 6:52 PM (buyer 5:52 PM): text`, with the buyer's day added when it
 is a different day. If an id does not parse, the page's text is shown and
-marked `(Fiverr account time)`. The reply's first line is
-`Buyer local time now: 9:54 AM (UTC+0, Country)`.
+marked `(Fiverr account time)`. The line under the title is
+`Times: Africa/Lagos. Buyer local time now: 6:07 PM (UTC+0, Country)`.
+
+**My time zone** (`src/lib/myZone.ts`, Settings → My time zone, or
+`/timezone`). The browser's own zone is never used as "my time" without
+saying so: an anti-detect browser reports each profile's configured zone
+(for example UTC-5), not the computer's, and hides the real one. So the zone
+is a setting (an IANA name), and every formatter takes it as an argument and
+passes it to `Intl.DateTimeFormat`'s `timeZone` option. When it is empty the
+browser's zone is used and marked: `Times: America/Bogota (browser zone, not
+set: …)`, `last alert 12:52 PM (America/Bogota, browser zone, not set)`. It
+covers Full message, the alert's buyer-time day, `/status`, the popup, the
+options page and the diagnostics log (`2026-11-16 18:52:00.120 +01:00`). The
+buyer's offset does not depend on it: the header clock is compared with UTC.
 
 **The buyer's offset is learned passively.** The header shows
 `<time>2:57 AM</time><span>(local time)</span>` next to the buyer's avatar. In
@@ -276,6 +288,8 @@ after each extension update, so they show in Telegram's "/" menu.
 | `/status` | each account: label, online, alerts on/paused, unread count, last alert; the leader adds offline accounts |
 | `/pause`, `/resume` | every account, replying with its new state |
 | `/pause {label}`, `/resume {label}` | only that account |
+| `/timezone {zone}` (`Africa/Lagos`, or a short form such as `Lagos` that matches one zone) | every account saves it and confirms; the leader names offline accounts, which miss it, and alone answers an unknown or ambiguous zone |
+| `/timezone` | each account: the zone it uses now, or "not set" with the browser zone |
 | `/help` | the leader: commands and examples |
 
 The relay sends every command to every profile, and each one decides for
@@ -309,9 +323,10 @@ src/background/relay.ts     WebSocket client: auth, ping, ack, claims, backoff
 src/background/watchTab.ts  pinned tab, reload alarm, reads, job queue
 src/background/alerts.ts    toast / list message → Telegram
 src/background/listSync.ts  saved list state, compare after reloads, stale page check
-src/background/commands.ts  commands (/check /full /status /pause /resume /help), buttons, leader rule, offline notice
+src/background/commands.ts  commands (/check /full /status /pause /resume /timezone /help), buttons, leader rule, offline notice
 src/background/buyerZones.ts saved buyer UTC offsets per username
 src/lib/buyerTime.ts        message time from the id, buyer offset from the header clock, formatting
+src/lib/myZone.ts           My time zone: setting, browser fallback, zone lookup and offsets
 src/content/buyerHeader.ts  reads the conversation header clock passively in any Fiverr tab
 src/content/observer.ts     toast MutationObservers, replay flag
 src/content/inboxWatcher.ts inbox list detector (works in hidden tabs)

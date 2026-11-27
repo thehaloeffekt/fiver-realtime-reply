@@ -173,23 +173,23 @@ describe('Full message with my time and the buyer time', () => {
 
   it('the real example: account UTC-5 showed 4:53 AM, me UTC+1, buyer UTC+0', () => {
     const msg = { id: id(at('2026-11-16T09:53:00Z')), time: 'Nov 16, 4:53 AM', text: 'hello there', files: [] };
-    expect(formatConversation([msg], uk, now, 'Europe/Paris')).toBe('<i>Nov 16, 10:53 AM (buyer 9:53 AM)</i>: hello there');
+    expect(formatConversation([msg], uk, 'Europe/Paris', now)).toBe('<i>Nov 16, 10:53 AM (buyer 9:53 AM)</i>: hello there');
   });
 
   it('shows the buyer\'s day when it is a different day from mine', () => {
     const msg = { id: id(at('2026-11-16T02:51:00Z')), time: '', text: 'late one', files: ['plan.pdf'] };
     const west: BuyerZone = { offset: -300, at: now };
-    expect(formatConversation([msg], west, now, 'Europe/Paris')).toBe('<i>Nov 16, 3:51 AM (buyer Nov 15, 9:51 PM)</i>: late one [file: plan.pdf]');
+    expect(formatConversation([msg], west, 'Europe/Paris', now)).toBe('<i>Nov 16, 3:51 AM (buyer Nov 15, 9:51 PM)</i>: late one [file: plan.pdf]');
   });
 
   it('no buyer time when the offset is unknown', () => {
     const msg = { id: id(at('2026-11-16T09:53:00Z')), time: '', text: 'hi', files: [] };
-    expect(formatConversation([msg], null, now, 'Europe/Paris')).toBe('<i>Nov 16, 10:53 AM</i>: hi');
+    expect(formatConversation([msg], null, 'Europe/Paris', now)).toBe('<i>Nov 16, 10:53 AM</i>: hi');
   });
 
   it('falls back to the page time, marked as the Fiverr account time, when the id gives none', () => {
     const msg = { id: 'not-a-uuid', time: 'Nov 16, 4:53 AM', text: 'hi', files: [] };
-    expect(formatConversation([msg], uk, now, 'Europe/Paris')).toBe('<i>Nov 16, 4:53 AM (Fiverr account time)</i>: hi');
+    expect(formatConversation([msg], uk, 'Europe/Paris', now)).toBe('<i>Nov 16, 4:53 AM (Fiverr account time)</i>: hi');
   });
 
   it('adds "?" after the buyer time when the offset is over 30 days old', () => {
@@ -199,12 +199,17 @@ describe('Full message with my time and the buyer time', () => {
   });
 
   it('top line: buyer local time now, offset and country', () => {
-    const html = fullReplyText('Main', 'some_buyer', 'line', { ...uk, country: 'Example Country' }, now, 'Europe/Paris');
-    expect(html.split('\n').slice(0, 3)).toEqual(['<b>Main</b>: last messages from <b>@some_buyer</b>', 'Buyer local time now: 9:54 AM (UTC+0, Example Country)', 'line']);
-    expect(fullReplyText('Main', 'some_buyer', 'line', null, now).split('\n')[1]).toBe('line');
+    const paris = { zone: 'Europe/Paris', set: true };
+    const html = fullReplyText('Main', 'some_buyer', 'line', { ...uk, country: 'Example Country' }, paris, now);
+    expect(html.split('\n').slice(0, 3)).toEqual([
+      '<b>Main</b>: last messages from <b>@some_buyer</b>',
+      'Times: Europe/Paris. Buyer local time now: 9:54 AM (UTC+0, Example Country)',
+      'line',
+    ]);
+    expect(fullReplyText('Main', 'some_buyer', 'line', null, paris, now).split('\n').slice(1, 3)).toEqual(['Times: Europe/Paris.', 'line']);
   });
 
-  it('my time uses this computer\'s zone', () => {
+  it('my time uses the zone it is given', () => {
     expect(formatMine(at('2026-11-16T09:53:00Z'), 'Asia/Tokyo')).toBe('Nov 16, 6:53 PM');
   });
 });

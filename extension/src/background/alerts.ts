@@ -1,5 +1,6 @@
 import { DEDUPE_WINDOW_MS, Deduper, REPLAY_WINDOW_MS, SenderGate, dedupeKey, senderId, senderKey, type AlertSource } from '../lib/dedupe';
 import { formatBuyerAt } from '../lib/buyerTime';
+import { myZone } from '../lib/myZone';
 import { formatAlert } from '../lib/format';
 import { INBOX_URL } from '../lib/constants';
 import type { ListMessage } from '../lib/inboxRow';
@@ -96,7 +97,7 @@ async function handleIncoming(m: Incoming): Promise<void> {
 
   // The buyer's local time now, only when their offset was learned before.
   const zone = zoneFor(s, m.username);
-  const buyerTime = zone ? formatBuyerAt(now, zone, now) : undefined;
+  const buyerTime = zone ? formatBuyerAt(now, zone, now, myZone(s.settings).zone) : undefined;
   const { html, keyboard } = formatAlert(labelOf(s), m, body.text, s.accountId, m.more ?? 0, buyerTime);
   try {
     await notify(html, { keyboard, claim: true, retries: 3 });

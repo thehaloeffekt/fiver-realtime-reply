@@ -1,7 +1,9 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { DEFAULT_RELAY_URL } from '../../lib/constants';
 import { formatAgo } from '../../lib/format';
 import { deriveRelayKeys } from '../../lib/keys';
+import { allZones, browserZone, lookupZone, myZone, zoneOffsetText } from '../../lib/myZone';
+import { formatMineShort } from '../../lib/buyerTime';
 import {
   isConfigured,
   labelOf,
@@ -358,6 +360,8 @@ function SettingsTab({ local, session }: { local: LocalState; session: SessionSt
         ))}
       </section>
 
+      <MyTimeZone settings={s} now={now} />
+
       <ReloadInterval settings={s} nextReloadAt={session.nextReloadAt} now={now} />
 
       <section className="card card-pad">
@@ -377,6 +381,66 @@ function SettingsTab({ local, session }: { local: LocalState; session: SessionSt
 
       <Connection local={local} session={session} now={now} />
     </div>
+  );
+}
+
+/**
+ * The zone all times are shown in. An input with a datalist: Chrome filters
+ * the list as you type, so it is a searchable list of every IANA zone. Short
+ * forms ("Lagos") are accepted when they match one zone.
+ */
+function MyTimeZone({ settings, now }: { settings: Settings; now: number }) {
+  const zones = useMemo(() => allZones(), []);
+  const [text, setText] = useState(settings.myTimeZone);
+  useEffect(() => setText(settings.myTimeZone), [settings.myTimeZone]);
+  const mine = myZone(settings);
+  const typed = text.trim();
+  const found = typed ? lookupZone(typed, zones) : null;
+  const valid = found?.ok === true;
+  const dirty = valid && found.zone !== settings.myTimeZone;
+  const browser = browserZone();
+
+  return (
+    <section className="card card-pad">
+      <h2 className="card-title">My time zone</h2>
+      <div className="row">
+        <input
+          className="input"
+          list="tz-list"
+          placeholder="Search, e.g. Lagos or Africa/Lagos"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          spellCheck={false}
+          aria-label="My time zone"
+        />
+        <datalist id="tz-list">
+          {zones.map((z) => (
+            <option key={z} value={z} />
+          ))}
+        </datalist>
+        <button className="btn btn-primary" disabled={!dirty} onClick={() => valid && void patchSettings({ myTimeZone: found.zone })}>
+          Save
+        </button>
+        <button className="btn" disabled={!settings.myTimeZone} onClick={() => void patchSettings({ myTimeZone: '' })}>
+          Clear
+        </button>
+      </div>
+      <div className="help">
+        {mine.set ? (
+          <>
+            Times in alerts, Full message, /status, the popup and the diagnostics log are shown in <b>{mine.zone}</b> (now {formatMineShort(now, now, mine.zone)},{' '}
+            {zoneOffsetText(now, mine.zone)}).
+          </>
+        ) : (
+          <>
+            <b>Not set.</b> Times use this browser's zone, {browser} (now {formatMineShort(now, now, browser)}, {zoneOffsetText(now, browser)}), and are marked "not set". An
+            anti-detect browser reports the zone of the profile, not of your computer, so pick your real zone here.
+          </>
+        )}{' '}
+        Each Chrome profile keeps its own setting; send <code>/timezone Africa/Lagos</code> in Telegram to set every profile at once.
+        {typed && !valid && (found!.matches.length ? ` "${typed}" matches ${found!.matches.join(', ')}: pick one.` : ` "${typed}" is not a time zone.`)}
+      </div>
+    </section>
   );
 }
 
@@ -429,7 +493,7 @@ function Connection({ local, session, now }: { local: LocalState; session: Sessi
     ['Relay', <span key="r">{relay.text}</span>],
     ['Relay URL', <code key="u">{local.relayUrl}</code>],
     ['Bot key', local.botKey ? <code key="k">{local.botKey.slice(0, 16)}…</code> : '—'],
-    ['Other profiles', others.length ? others.map((a) => `${a.label || a.accountId} (${a.online ? 'online' : `seen ${formatAgo(a.lastSeen, now)}`})`).join(', ') : 'none'],
+    ['Other profiles', others.length ? others.map((a) => `${a.label || a.accountId} (${a.online ? 'online' : `seen ${formatAgo(a.lastSeen, now, myZone(local.settings).zone)}`})`).join(', ') : 'none'],
   ];
 
   return (
