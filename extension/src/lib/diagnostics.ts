@@ -126,3 +126,26 @@ export function formatDiagnosticsLog(entries: DiagEntry[], meta: { version: stri
   });
   return [...header, ...lines].join('\n');
 }
+
+/** Normalized start of a reply text, for finding it in diagnostics entries. */
+export function replyProbe(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().toLowerCase().slice(0, 24);
+}
+
+/**
+ * Leaves out every entry that holds the start of a reply sent from Telegram
+ * (the list row "Me: …" and the new message in the thread show it), so the
+ * reply text never lands in the diagnostics log. An entry is kept as a stub
+ * with its time and kind, so the log still shows that something happened.
+ */
+export function redactReplies(entries: DiagEntry[], probes: string[]): DiagEntry[] {
+  const list = probes.filter(Boolean);
+  if (!list.length) return entries;
+  const escaped = list.map((p) => p.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'));
+  return entries.map((e) => {
+    if (!e.data) return e;
+    const hay = JSON.stringify(e.data).replace(/\\n|\\t|\\r/g, ' ').replace(/\s+/g, ' ').toLowerCase();
+    if (!list.some((p) => hay.includes(p)) && !escaped.some((p) => hay.includes(p))) return e;
+    return { ...e, data: { redacted: 'left out: holds a reply sent from Telegram' } };
+  });
+}

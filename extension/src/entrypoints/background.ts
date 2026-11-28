@@ -5,11 +5,12 @@ import { saveBuyerZone } from '../background/buyerZones';
 import { handleAccountRemoved, handleOffline, handleUpdate, labelSavedText, pauseText, registerCommands, setAlertsOn } from '../background/commands';
 import { onListState, onStale, reloadAndCompare, restWatchTab, watchdog } from '../background/listSync';
 import { notify } from '../background/notify';
+import { REPLY_ALARM, onPeer, recoverReplies, replyProbes, sweepReplies } from '../background/replies';
 import { connectRelay, relayHeartbeat, retryRelayNow, setRelayHandlers } from '../background/relay';
 import { RELAY_ALARM, applyUninstallUrl, connectAndRegisterWebhook, disconnectProfile, ensureRelayAlarm, onLinked, onRemovedRemotely, waitForStart } from '../background/setup';
 import { RELOAD_ALARM, ensureWatchTab, onTabRemoved, scheduleReload } from '../background/watchTab';
 import { FIVERR_ORIGIN } from '../lib/constants';
-import { appendDiag, sanitizeEntries, type DiagEntry } from '../lib/diagnostics';
+import { appendDiag, redactReplies, sanitizeEntries, type DiagEntry } from '../lib/diagnostics';
 import { newAccountId, newRemovalCode } from '../lib/keys';
 import type { ContentToBackground, UiToBackground } from '../lib/messages';
 import { getLocal, getSession, isConfigured, labelOf, setLocal, updateLocal } from '../lib/storage';
@@ -22,6 +23,7 @@ export default defineBackground({
       onOffline: (accountId, label) => void handleOffline(accountId, label),
       onAccountRemoved: (accountId, label) => void handleAccountRemoved(accountId, label),
       onRemoved: () => void onRemovedRemotely(),
+      onPeer: (from, body) => onPeer(from, body),
     });
 
     // Listeners are registered synchronously so Chrome can wake the worker for them.
@@ -62,6 +64,10 @@ function boot(): Promise<void> {
     // Profiles set up before removal codes existed get one now; the relay
     // learns its hash at the connect below.
     if (s.botKey && !s.removalCode) await setLocal({ removalCode: newRemovalCode() });
+    // Before the relay connects, so no button press is handled first: a
+    // reply left in "sending" by a stopped worker becomes "unknown", never
+    // "preview" again (see replies.ts).
+    await recoverReplies().catch((e) => console.warn('[reply] recovery failed', e));
     // At every start, as Chrome keeps the uninstall URL only per install.
     await applyUninstallUrl();
     // Reconnect check every minute. It also wakes a stopped worker.
@@ -76,6 +82,10 @@ async function onAlarm(alarm: Browser.alarms.Alarm) {
   if (alarm.name === RELAY_ALARM) {
     await relayHeartbeat();
     await watchdog().catch((e) => console.warn('[watch] watchdog failed', e));
+    return;
+  }
+  if (alarm.name === REPLY_ALARM) {
+    await sweepReplies().catch((e) => console.warn('[reply] sweep failed', e));
     return;
   }
   if (alarm.name === RELOAD_ALARM) {
@@ -209,7 +219,8 @@ function writeDiagnostics(fn: (log: DiagEntry[]) => DiagEntry[]): Promise<void> 
 async function recordDiagnostics(raw: unknown, tabId: number | undefined): Promise<void> {
   const { settings } = (await browser.storage.local.get('settings')) as { settings?: { debug?: boolean } };
   if (!settings?.debug) return;
-  const entries = sanitizeEntries(raw);
+  // The text of a reply sent from Telegram never goes into the log.
+  const entries = redactReplies(sanitizeEntries(raw), replyProbes());
   if (!entries.length) return;
   // Tag each entry with its tab, and whether that tab is the watch tab.
   const { watchTabId } = await getSession();

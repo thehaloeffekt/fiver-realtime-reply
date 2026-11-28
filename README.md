@@ -62,6 +62,7 @@ tagged `acct:<accountId>`. All frames are JSON text.
 | `{"type":"claim","chatId","messageId"}` | "I sent this message." Replies, button presses and reactions on it are routed to this account. Batch form: `{"type":"claim","items":[{chatId,messageId}, {inlineMessageId}, …]}` (max 100). |
 | `{"type":"ack","ids":[update_id,…]}` | Removes delivered updates from the buffer (max 100). |
 | `{"type":"forget","accountId"}` | Removes one account of this bot (any profile may remove any account, including itself). See Removal. Error `unknown_account` if the relay does not know it. |
+| `{"type":"peer","body":{…}}` | Lets profiles coordinate (for example `/reply` asking which profile has a buyer). `body` must be a JSON object whose JSON is at most 1024 bytes, else error `bad_peer`. Passed at once to every other online profile as a `peer` frame; never stored, queued or replayed, so a profile that is offline does not get it. Rate limited (see Limits): over the limit, error `peer_rate` and the frame is dropped. |
 | `ping` (plain text) | Keep-alive, every 20 s. The runtime answers `pong` (plain text) without waking the object. |
 | `{"type":"ping"}` | Older keep-alive, still answered with `{"type":"pong"}`, but it wakes the object. Prefer the plain-text form. |
 
@@ -74,8 +75,9 @@ tagged `acct:<accountId>`. All frames are JSON text.
 | `{"type":"offline","accountId","label"}` | An update for `accountId` was queued because that account has no open socket. Sent to one other connected instance, at most once per account per 5 minutes, so it can tell the user in Telegram. |
 | `{"type":"presence","accounts":[{accountId,label,online,lastSeen}]}` | Sent when an instance connects, leaves or is removed. Lists every known account, offline ones too (`online:false`), so a profile can show and remove an account whose browser is closed. `ready.accounts` has the same shape. |
 | `{"type":"removed"}` | This account was removed (forget, `GET /bye`, or auth with a removed `accountId`). The socket is closed with 4010 right after. The extension must clear its state and not reconnect. |
+| `{"type":"peer","from","body"}` | A `peer` frame from another profile. `from` is the sender's `accountId` (set by the relay, not by the sender); `body` is the object it sent. Never sent back to the sender's own account. |
 | `{"type":"account_removed","accountId","label"}` | Another account was removed. Sent to one other online profile so it can tell the user in Telegram; queued for the next profile that connects if none is online. Not sent when an account removed itself (the Settings flow tells the user itself). |
-| `{"type":"error","error","detail?"}` | Bad frame from an authenticated socket. |
+| `{"type":"error","error","detail?"}` | Bad frame from an authenticated socket (`bad_message`, `unknown_type`, `bad_claim`, `bad_forget`, `unknown_account`, `bad_peer`, `peer_rate`, …). |
 
 ### Close codes
 
@@ -106,8 +108,15 @@ Rules, first match wins:
    `c|{accountId}|{action}|{arg}` (at least four `|`-separated parts, `arg`
    may be empty, `accountId` in the allowed charset), only that account,
    `routed:true`. Any other `callback_data`: every instance, `routed:false`.
-4. **Any other message, reaction or inline result without a claim** —
-   dropped (answered `200`, never stored).
+4. **Message without a claim** — if it is a reply to a message sent by a bot
+   (`reply_to_message.from.is_bot` is `true`, for example an alert whose claim
+   expired or never reached the relay), the same fallback as rule 3: the first
+   button in `reply_to_message.reply_markup.inline_keyboard` whose
+   `callback_data` is `c|{accountId}|{action}|{arg}` names the account, which
+   alone gets it, `routed:true`. No such button: every instance,
+   `routed:false`. A reply to a message not sent by a bot, and a message that
+   replies to nothing, are dropped (answered `200`, never stored). Reactions
+   and inline results without a claim are dropped too.
 5. **Everything else** (for example `my_chat_member` when the user blocks the
    bot) — every instance, `routed:false`.
 
@@ -166,6 +175,33 @@ storage is cleared.
 | Webhook body | 64 KB | `413` |
 | Sockets per bot | 32 | Closed with 4429 |
 | Client frame | 16 KB | Error frame, or close before auth |
+| `peer` frames per bot | 60 in any rolling minute, all profiles together | Error `peer_rate`, frame dropped |
+| `peer` body | 1024 bytes of JSON | Error `bad_peer` |
+
+## What the relay sees of a reply
+
+When the user replies to an alert in Telegram, the relay receives the full
+Telegram update: the reply text, the chat id, the message ids, and the replied
+message as Telegram includes it, which holds the text of the alert being
+replied to and its buttons.
+
+- The update (text included) is kept in the `pending` table only until it is
+  acked: by the target account for a routed update, by any profile for a
+  broadcast one. With the profile online that is normally under a second.
+  Unacked, it is deleted after 4 min 30 s by the alarm (hard limit 5 minutes).
+- Its `update_id` is kept for 10 minutes in `seen`, to de-duplicate Telegram
+  retries. Nothing else of the update is kept.
+- Claims keep only the chat id, the message id and the `accountId`, for 14 days.
+- `peer` frames carry only what the extension puts in them (it sends only a
+  Telegram message id and a yes/no) and are never stored.
+- The relay does not log update bodies.
+
+Deleted rows are not guaranteed gone from Cloudflare. A SQLite-backed Durable
+Object has Point-in-Time Recovery: Cloudflare documents that its database can
+be restored to any point in time in the past 30 days. The relay never uses
+this, but whoever controls the Cloudflare account (and can deploy code to the
+Worker) could restore an earlier state, which would bring back rows deleted
+since, reply texts included.
 
 ## Development
 

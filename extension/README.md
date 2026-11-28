@@ -7,8 +7,12 @@ on the same bot, through the relay `fta-relay` (protocol: the root README on
 the relay branch).
 
 The extension only **reads** Fiverr pages, and only navigates or reloads its
-own watch tab. It never types, clicks or submits anything on Fiverr, and it
-sends only text to Telegram.
+own watch tab. It sends only text to Telegram. There is one exception, off by
+default: **Send replies from Telegram** (below). With that switch on, and only
+after you press "Send" under the exact text in Telegram, it types that text in
+the message box of the right buyer's conversation and clicks Send. All of
+that code is in one file, `src/content/composer.ts`; a test fails if any other
+file types, clicks or focuses on a page.
 
 ## Load it in Chrome
 
@@ -354,6 +358,75 @@ Chrome" / "alerts on"), so every device on the chat sees it. `/pause` and
 `/resume` reply instead. Messages that arrive while paused are not sent later:
 the list state keeps updating, so `/resume` does not replay them.
 
+## Send replies from Telegram
+
+Off by default (Settings → "Send replies from Telegram", with a confirmation
+step to turn it on; the popup shows whether it is on; `/status` shows it per
+account). Fiverr can treat automatic input as a rule violation: use it at your
+own risk.
+
+**Start a reply.** Either reply in Telegram, with text, to an alert or to a
+"Full message" reply (the buyer and account are those of that message), or
+send `/reply buyer text`, or `/reply buyer label text` when more than one
+account has that buyer. Without a label, every online profile tells the
+others (relay `peer` frame: only the command's message id and yes/no) whether
+its inbox list has the buyer; exactly one holder makes the preview, two or more
+get one "name the account" answer, none gets "not in any list".
+
+**Preview, never a direct send.** The bot answers "Send this to @buyer from
+Account?", the full text, and the buttons Send and Cancel. A wrong buyer or a
+typing error on Fiverr cannot be undone, so nothing is typed before Send. The
+preview expires after 5 minutes ("Expired. Nothing was sent."). After Send the
+same message becomes "Sending…", then "Sent to @buyer at {my time} (buyer
+{buyer time})", "Not sent: {reason}" or "Unknown. Check Fiverr before you send
+again." Each result says that opening the conversation marked it as read.
+
+**Refused:** sending off ("Sending is off for {account}…"), photos, files,
+stickers, voice notes and other non-text messages, empty text, and text over
+2,500 characters. That limit is not a confirmed Fiverr limit: Fiverr documents
+none and the captured message box has no `maxlength`. It is a conservative
+cap; the driver also refuses text over the box's own `maxlength` if Fiverr adds
+one, and checks after every step that the box holds exactly the typed text.
+
+**On Fiverr** (watch tab only, one job in its queue): open `/inbox/{buyer}`,
+wait for the message box; check the URL path and the username in the
+conversation header; stop if the box already has a draft (the user's own
+work); type in chunks of 1–4 characters with 70–220 ms pauses (longer after
+spaces, punctuation and before line breaks), using the textarea's native
+value setter and `beforeinput`/`input` events (React ignores a plain
+assignment); check the URL, header and box again; one click on
+`button[aria-label="Send"]`, never Enter (the Enter behaviour is a user
+setting). "Sent" only when a new own message with a real Fiverr id and the same
+text appears within 20 s and no warning shows. A new `role="alert"` notice
+without the message is "Not sent", and the typed text is cleared. Anything
+else is "Unknown". Never a second click, never a retry. Then back to `/inbox`.
+
+**Hidden tab.** Chrome runs timers in a hidden tab about once a second (once a
+minute after 5 minutes hidden), so the content script does not time the
+typing. The service worker waits between steps and sends each chunk as a
+message; messages reach a hidden tab at once, and each call keeps the worker
+alive. Total typing is capped at 40 s (longer chunks for long texts). Limits:
+the content script still runs inside the tab, so a tab that Chrome froze or
+discarded does not answer (before the click that is "Not sent", after it "Unknown"); a worker
+stopped by Chrome mid-send leaves "Unknown".
+
+**At most one send per confirmed reply.** Each reply is stored with a state:
+preview, sending, sent, failed, unknown, cancelled, expired. The Send press
+changes preview → sending in one serialized storage write, finished before
+the first keystroke. A replayed update finds "sending" or a final state and
+does nothing; a worker restart turns "sending" into "unknown", never back to
+"preview". One send per profile at a time ("Busy. Try again in a moment.").
+Only the linked chat is accepted. Finished replies lose their text at once and
+are deleted after 10 minutes (the relay can replay an update for at most 5).
+Disconnecting or removing the profile stops a send in progress, marks open
+previews and drops all pending replies.
+
+**Privacy.** The reply text is never written to the diagnostics log (entries
+that hold it are replaced by a stub). The relay sees the Telegram update with
+the text while it routes it (root README, "What the relay sees of a reply").
+The extension's own message never alerts: the detectors skip "Me" messages and
+"Me: " rows, and the background drops a matching alert for 10 minutes.
+
 ## Removing a profile
 
 A profile (one Chrome profile, one Fiverr account) can be removed from the bot
@@ -416,7 +489,12 @@ src/background/relay.ts     WebSocket client: auth, ping, ack, claims, backoff
 src/background/watchTab.ts  pinned tab, reload alarm, reads, job queue
 src/background/alerts.ts    toast / list message → Telegram
 src/background/listSync.ts  saved list state, compare after reloads, stale page check
-src/background/commands.ts  commands (/check /full /status /pause /resume /timezone /accounts /remove /help), buttons, leader rule, offline and removed notices
+src/background/commands.ts  commands (/check /full /reply /status /pause /resume /timezone /accounts /remove /help), buttons, leader rule, offline and removed notices
+src/background/replies.ts   replies from Telegram: preview, Send/Cancel, states, expiry, restart recovery, /reply peers
+src/background/replyDriver.ts paces one confirmed send on the watch tab (steps from the service worker)
+src/background/replyTargets.ts Telegram message id → buyer, for replies to alerts and Full message
+src/content/composer.ts     THE ONLY CODE THAT WRITES TO FIVERR: checks, typing, the Send click, result
+src/lib/typing.ts           typing plan: chunk sizes, pauses, 40 s cap
 src/background/setup.ts     setup step 2, uninstall URL, Disconnect this profile, removed elsewhere
 src/background/buyerZones.ts saved buyer UTC offsets per username
 src/lib/buyerTime.ts        message time from the id, buyer offset from the header clock, formatting

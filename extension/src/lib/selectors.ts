@@ -165,3 +165,49 @@ export const CAPTURE_TARGETS = {
 } as const;
 
 export type CaptureKind = keyof typeof CAPTURE_TARGETS;
+
+/**
+ * The message composer on a conversation page. Confirmed from a real capture
+ * (tests/fixtures/conversation.html):
+ *
+ *   <textarea id="send-message-text-area" role="textbox" placeholder="Type a message..." rows="1">
+ *   <button aria-label="attachments"> <button aria-label="emoji"> <button aria-label="quick-response">
+ *   <button data-testid="create-custom-offer-button">Create an offer</button>
+ *   <button aria-label="Send" disabled>   (enabled once the box has text)
+ *   <button data-testid="toggle-user-settings-popover">   (the Enter-to-send menu)
+ *
+ * Only src/content/composer.ts may use these. It is the one module that
+ * writes to a Fiverr page ("Send replies from Telegram"); everything else
+ * only reads.
+ */
+export const COMPOSER = {
+  /** The message box. */
+  textbox: 'textarea#send-message-text-area',
+  /**
+   * Fallback if Fiverr renames the id: a textarea with the same role and
+   * placeholder. Used only when exactly one element matches.
+   */
+  textboxFallback: 'textarea[role="textbox"][placeholder="Type a message..."]',
+  /**
+   * The Send button. No fallback on purpose: a guess here could press a
+   * different button. If Fiverr changes it, sending stops with "Not sent".
+   */
+  send: 'button[aria-label="Send"]',
+  /**
+   * Notices Fiverr may show when it blocks or warns about a message. NOT
+   * confirmed from a capture (no blocked message was captured): these are
+   * the standard ARIA roles for such notices. Only text that appears after
+   * the click counts.
+   */
+  warning: '[role="alert"], [role="alertdialog"]',
+} as const;
+
+/** Controls next to the message box that the extension must never touch. */
+export const COMPOSER_FORBIDDEN = [
+  'button[aria-label="attachments"]',
+  'button[aria-label="emoji"]',
+  'button[aria-label="quick-response"]',
+  '[data-testid="create-custom-offer-button"]',
+  '[data-testid="toggle-user-settings-popover"]',
+  'input[type="file"]',
+] as const;

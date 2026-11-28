@@ -30,6 +30,8 @@ export interface RelayHandlers {
   onAccountRemoved(accountId: string, label: string): void;
   /** This account was removed somewhere else (relay "removed" or close 4010). */
   onRemoved(): void;
+  /** A "peer" frame from another profile of this bot (never stored by the relay). */
+  onPeer?(from: string, body: Record<string, unknown>): void;
 }
 
 let handlers: RelayHandlers | null = null;
@@ -196,6 +198,9 @@ async function onFrame(socket: WebSocket, frame: Record<string, unknown>) {
       if (forgetting) forgetting();
       else handlers?.onRemoved();
       return;
+    case 'peer':
+      if (typeof frame.from === 'string' && frame.body && typeof frame.body === 'object') handlers?.onPeer?.(frame.from, frame.body as Record<string, unknown>);
+      return;
     case 'error':
       console.warn('[relay] error frame', frame);
       return;
@@ -288,6 +293,17 @@ export async function forgetSelf(): Promise<boolean> {
 export function sendForget(accountId: string): boolean {
   if (!ws || !isReadyNow) return false;
   ws.send(JSON.stringify({ type: 'forget', accountId }));
+  return true;
+}
+
+/**
+ * Sends a small object to every other online profile of this bot (relay
+ * "peer" frame; the relay forwards it at once and stores nothing). False
+ * when the socket is not ready.
+ */
+export function sendPeer(body: Record<string, unknown>): boolean {
+  if (!ws || !isReadyNow) return false;
+  ws.send(JSON.stringify({ type: 'peer', body }));
   return true;
 }
 

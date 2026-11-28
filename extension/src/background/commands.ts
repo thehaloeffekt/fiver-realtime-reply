@@ -22,6 +22,8 @@ import { saveBuyerZone, zoneFor } from './buyerZones';
 import { answerCallback, notify, notifyLong, sendTo } from './notify';
 import { isRelayOpen, sendForget } from './relay';
 import { reloadAndCompare } from './listSync';
+import { holdersOf, onReplyButton, startReply } from './replies';
+import { buyerFromKeyboard, rememberReplyTarget, replyTargetOf } from './replyTargets';
 import { askTabOnce, readConversation } from './watchTab';
 
 type Json = Record<string, any>;
@@ -32,6 +34,7 @@ const USERNAME = /^[A-Za-z0-9_.-]{1,64}$/;
 export const BOT_COMMANDS: BotCommand[] = [
   { command: 'check', description: 'Check all accounts now. /check label: one account' },
   { command: 'full', description: 'Last messages from a buyer: /full username [label]' },
+  { command: 'reply', description: 'Answer a buyer: /reply username [label] text (asks before sending)' },
   { command: 'status', description: 'Label, online state, unread conversations, last alert' },
   { command: 'pause', description: 'Pause alerts. /pause label: one account' },
   { command: 'resume', description: 'Resume alerts. /resume label: one account' },
@@ -147,13 +150,8 @@ async function onMessage(message: Json, routed: boolean) {
     return;
   }
   if (command === null) {
-    // A plain reply to one of our alerts (routed:true). Never sent to Fiverr.
-    if (routed) {
-      await notify('Replies are not sent to Fiverr. Open the inbox to answer the buyer.', {
-        replyTo: message.message_id,
-        keyboard: [[{ text: 'Open inbox', url: INBOX_URL }]],
-      });
-    }
+    // A reply in Telegram to an alert or a "Full message" reply.
+    if (message.reply_to_message) return replyFromTelegram(s, message, routed);
     return;
   }
   return runCommand(s, command, parsed!.args, message.message_id);
@@ -172,6 +170,7 @@ async function runCommand(s: LocalState, command: string, args: string, replyTo?
     buyer = first.replace(/^@/, '');
     label = rest.join(' ');
   }
+  if (command === 'reply') return replyCommand(s, args, presence, replyTo);
   // /accounts and /remove are about the group, and their argument is not a
   // "for this account" label: the leader alone answers them.
   if (command === 'accounts' || command === 'remove') {
@@ -225,7 +224,7 @@ async function runCommand(s: LocalState, command: string, args: string, replyTo?
   }
 }
 
-const KNOWN = new Set(['check', 'status', 'pause', 'resume', 'full', 'timezone', 'accounts', 'remove', 'help']);
+const KNOWN = new Set(['check', 'status', 'pause', 'resume', 'full', 'reply', 'timezone', 'accounts', 'remove', 'help']);
 const FULL_USAGE = 'Usage: <code>/full username</code> or <code>/full username label</code>, for example <code>/full @some_buyer</code>.';
 
 /** The buyer has a row in this account's saved inbox list. */
@@ -241,7 +240,10 @@ export function helpText(labels: string[]): string {
     `/check ${escapeHtml(ex)}: only the account named ${escapeHtml(ex)}`,
     '/full some_buyer: the last messages from that buyer (each account that has the buyer answers)',
     `/full @some_buyer ${escapeHtml(ex)}: from that buyer on ${escapeHtml(ex)} only`,
-    '/status: label, online state, unread conversations and last alert of each account',
+    '/reply some_buyer Thanks, I will send it today: answer a buyer. I show a preview first, and send it only when you press Send (needs "Send replies from Telegram" on in Settings)',
+    `/reply some_buyer ${escapeHtml(ex)} Thanks: from ${escapeHtml(ex)}, when more than one account has that buyer`,
+    'Or reply in Telegram to an alert or a "Full message" reply, with text: the same preview, for that buyer and account. Text only, no files.',
+    '/status: label, online state, unread conversations, last alert and sending from Telegram on or off, for each account',
     `/pause, /resume: stop or start alerts on all accounts; /pause ${escapeHtml(ex)}: one account`,
     '/timezone Africa/Lagos: show all times in that zone, on every account at once ("/timezone Lagos" works too)',
     '/timezone: the time zone each account uses now',
@@ -312,6 +314,9 @@ async function onCallback(cq: Json, routed: boolean) {
       await answerCallback(cq.id, 'Opening the conversation…');
       return replyFull(s, username, replyTo);
     }
+    case 'rs':
+    case 'rc':
+      return onReplyButton(cq as { id: string; message?: { message_id?: number } }, data!.action as 'rs' | 'rc', data!.arg);
     default:
       await answerCallback(cq.id, 'This button is not supported by this version.');
   }
@@ -448,8 +453,10 @@ async function replyFull(s: LocalState, username: string, replyTo?: number) {
   const parts = fullReplyParts(labelOf(s), username, body, zone, mine);
   const keyboard = checkKeyboard(s.accountId!, { text: 'Open conversation', url: inboxUrlFor(username) });
   // Several parts: the first replies to the command, the buttons go on the last.
+  // Claimed, and each part remembered as this buyer's: a reply to any part goes to them.
   for (const [i, part] of parts.entries()) {
-    await notify(part, { replyTo: i === 0 ? replyTo : undefined, keyboard: i === parts.length - 1 ? keyboard : undefined });
+    const sent = await notify(part, { replyTo: i === 0 ? replyTo : undefined, keyboard: i === parts.length - 1 ? keyboard : undefined, claim: true });
+    if (sent) await rememberReplyTarget(sent.message_id, username).catch(() => undefined);
   }
 }
 
@@ -472,22 +479,23 @@ export function seenText(ts: number | undefined, mine: MyZone, now = Date.now())
  * "<b>Main</b>: online, alerts on, 2 unread conversations, last alert 6:52 PM (Africa/Lagos)".
  * The number is Fiverr's "Unread" chip, which counts conversations, not messages.
  */
-export function statusLine(label: string, alertsOn: boolean, unread: { n: number | null; live: boolean }, lastAlertAt: number | undefined, mine: MyZone, now = Date.now()): string {
+export function statusLine(label: string, alertsOn: boolean, unread: { n: number | null; live: boolean }, lastAlertAt: number | undefined, mine: MyZone, now = Date.now(), sendingOn?: boolean): string {
   const u =
     unread.n === null
       ? 'unread count unknown'
       : `${unread.n} unread ${unread.n === 1 ? 'conversation' : 'conversations'}${unread.live ? '' : ' (at the last reload)'}`;
-  return `<b>${escapeHtml(label)}</b>: online, alerts ${alertsOn ? 'on' : 'paused'}, ${u}, last alert ${escapeHtml(seenText(lastAlertAt, mine, now))}`;
+  const sending = sendingOn === undefined ? '' : `, sending from Telegram ${sendingOn ? 'on' : 'off'}`;
+  return `<b>${escapeHtml(label)}</b>: online, alerts ${alertsOn ? 'on' : 'paused'}, ${u}, last alert ${escapeHtml(seenText(lastAlertAt, mine, now))}${sending}`;
 }
 
 async function replyStatus(s: LocalState, includeOthers: boolean) {
   const mine = myZone(s.settings);
-  const lines = [statusLine(labelOf(s), s.settings.sendAlerts, await unreadNow(s), s.lastAlertAt, mine)];
+  const lines = [statusLine(labelOf(s), s.settings.sendAlerts, await unreadNow(s), s.lastAlertAt, mine, Date.now(), s.settings.sendReplies)];
   // Offline accounts cannot answer: the leader lists them.
   if (includeOthers && (await isLeader(s.accountId!))) {
     const { presence } = await getSession();
     for (const a of presence.filter((a) => !a.online && a.accountId !== s.accountId)) {
-      lines.push(`<b>${escapeHtml(a.label || a.accountId)}</b>: offline since ${escapeHtml(seenText(a.lastSeen, mine))}`);
+      lines.push(`<b>${escapeHtml(a.label || a.accountId)}</b>: offline since ${escapeHtml(seenText(a.lastSeen, mine))}, sending from Telegram unknown (offline)`);
     }
   }
   if (!isRelayOpen()) lines.push('<i>Relay connection is down.</i>');
@@ -631,4 +639,103 @@ export async function handleAccountRemoved(accountId: string, label: string): Pr
   const s = await getLocal();
   if (!s.chatId || !s.token || !accountId || accountId === s.accountId) return;
   await notify(accountRemovedText(label || accountId)).catch(() => undefined);
+}
+
+// ---------------------------------------------------------------- replies
+
+/** Telegram message kinds that are not text. Files are never sent to Fiverr. */
+const FILE_FIELDS = ['photo', 'document', 'sticker', 'voice', 'video', 'video_note', 'audio', 'animation', 'contact', 'location', 'venue', 'poll', 'dice', 'story', 'paid_media'];
+export const hasFile = (message: Json) => FILE_FIELDS.some((f) => message[f] !== undefined);
+
+/**
+ * A reply in Telegram to one of this bot's messages. The buyer is the one
+ * that message is about (recorded when it was sent, or read from its
+ * buttons). A reply the relay sent to every profile (routed:false) is
+ * handled only by the profile that the message belongs to.
+ */
+async function replyFromTelegram(s: LocalState, message: Json, routed: boolean) {
+  const replied: Json = message.reply_to_message;
+  if (replied.from && replied.from.is_bot !== true) return;
+  if (s.bot?.id && replied.from?.id !== undefined && replied.from.id !== s.bot.id) return;
+  const buyer = (await replyTargetOf(replied.message_id)) ?? buyerFromKeyboard(replied.reply_markup, s.accountId!);
+  if (!buyer) {
+    if (routed) {
+      await notify('I cannot tell which buyer this reply is for. Reply to an alert or to a "Full message" reply, or send <code>/reply username text</code>.', {
+        replyTo: message.message_id,
+      });
+    }
+    return;
+  }
+  await startReply({
+    buyer,
+    text: typeof message.text === 'string' ? message.text : undefined,
+    hasFile: hasFile(message),
+    sourceKey: `${message.chat?.id}:${message.message_id}`,
+    replyTo: message.message_id,
+  });
+}
+
+export const REPLY_USAGE =
+  'Usage: <code>/reply username text</code>, or <code>/reply username label text</code> when more than one account has that buyer. For example <code>/reply some_buyer Thanks, I will send it today.</code>';
+
+/**
+ * Splits "/reply" arguments: "buyer [label] text". The label is taken only
+ * when the text starts with a known account label followed by a space or
+ * line break (longest label first); the preview shows which account and text
+ * were understood before anything is sent.
+ */
+export function parseReplyArgs(args: string, labels: string[]): { buyer: string; label: string; text: string } | null {
+  const m = /^@?([A-Za-z0-9_.-]{1,64})(?:\s+([\s\S]*))?$/.exec(args.trim());
+  if (!m) return null;
+  const rest = (m[2] ?? '').trim();
+  const sorted = [...labels].sort((a, b) => b.length - a.length);
+  for (const l of sorted) {
+    const head = rest.slice(0, l.length);
+    if (sameLabel(head, l) && /^\s/.test(rest.slice(l.length))) return { buyer: m[1]!, label: l, text: rest.slice(l.length).trim() };
+  }
+  return { buyer: m[1]!, label: '', text: rest };
+}
+
+async function replyCommand(s: LocalState, args: string, presence: PresenceAccount[], replyTo?: number) {
+  const myId = s.accountId!;
+  const myLabel = knownLabel(s);
+  const parsed = parseReplyArgs(args, validLabels(myLabel, myId, presence));
+  const sourceKey = `${s.chatId}:${replyTo}`;
+  if (!parsed || !parsed.text) {
+    if (await isLeader(myId)) await notify(REPLY_USAGE, { replyTo });
+    return;
+  }
+  const { buyer, label, text } = parsed;
+  const request = { buyer, text, hasFile: false, sourceKey, replyTo };
+
+  if (label) {
+    const target = resolveTarget(myLabel, myId, presence, label);
+    if (target.kind === 'me') return startReply(request);
+    if (target.kind === 'other' && !target.account.online && (await isLeader(myId))) {
+      await notify(`<b>${escapeHtml(target.account.label)}</b> is offline (last seen ${escapeHtml(seenText(target.account.lastSeen, myZone(s.settings)))}). Nothing was sent. Open Chrome on that profile.`, { replyTo });
+    }
+    return;
+  }
+
+  // No label: the account that has this buyer. Every online profile tells
+  // the others whether it has the buyer, so all of them see the same answer.
+  const others = presence.filter((a) => a.online && a.accountId !== myId).map((a) => a.accountId);
+  const holders = typeof replyTo === 'number' ? await holdersOf(replyTo, hasBuyer(s, buyer), myId, others) : hasBuyer(s, buyer) ? [myId] : [];
+  if (holders.length === 1) {
+    if (holders[0] === myId) return startReply(request);
+    return;
+  }
+  if (holders.length > 1) {
+    if (holders[0] !== myId) return; // the first holder answers for all
+    const accounts = knownAccounts(s, presence);
+    const names = holders.map((id) => accounts.find((a) => a.accountId === id)?.label || id);
+    await notify(
+      `<b>@${escapeHtml(buyer)}</b> is in ${holders.length} accounts: ${names.map((n) => `<b>${escapeHtml(n)}</b>`).join(', ')}. Nothing was sent. Name the account: <code>/reply ${escapeHtml(buyer)} ${escapeHtml(names[0]!)} your text</code>.`,
+      { replyTo },
+    );
+    return;
+  }
+  if (await isLeader(myId)) {
+    await notify(`<b>@${escapeHtml(buyer)}</b> is not in the inbox list of any online account. Nothing was sent. If the buyer is further down the list, name the account: <code>/reply ${escapeHtml(buyer)} label your text</code>.`, { replyTo });
+  }
 }

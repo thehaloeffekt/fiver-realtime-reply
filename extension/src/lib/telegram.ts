@@ -117,6 +117,22 @@ export function sendMessage(token: string, chatId: number, html: string, opts: S
   return callApi<SentMessage>(token, 'sendMessage', params, { retries: opts.retries ?? 0 });
 }
 
+/**
+ * Replaces the text of a message the bot sent. Without `keyboard` its buttons
+ * are removed (used to turn a reply preview into "Sent", "Cancelled", …).
+ */
+export function editMessageText(token: string, chatId: number, messageId: number, html: string, keyboard?: InlineKeyboard) {
+  const params: Record<string, unknown> = {
+    chat_id: chatId,
+    message_id: messageId,
+    text: wellFormed(html),
+    parse_mode: 'HTML',
+    link_preview_options: { is_disabled: true },
+    reply_markup: { inline_keyboard: keyboard ?? [] },
+  };
+  return callApi<unknown>(token, 'editMessageText', params, { retries: 2 });
+}
+
 export function answerCallbackQuery(token: string, id: string, text?: string) {
   return callApi<boolean>(token, 'answerCallbackQuery', text ? { callback_query_id: id, text } : { callback_query_id: id });
 }

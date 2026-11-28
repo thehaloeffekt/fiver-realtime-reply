@@ -99,18 +99,43 @@ export function routeKeyOf(update: Json): RouteKey | null {
 }
 
 /**
- * Fallback for button presses: the extension writes the owning account into
- * every button as `c|{accountId}|{action}|{arg}`. Returns that accountId, or
- * null when the data does not have this shape.
+ * Parses our button format `c|{accountId}|{action}|{arg}` and returns the
+ * accountId, or null when `data` does not have this shape.
  */
-export function callbackAccountOf(update: Json): string | null {
-	const data = obj(update.callback_query)?.data;
+export function accountOfCallbackData(data: unknown): string | null {
 	if (typeof data !== "string") return null;
 	const parts = data.split("|");
 	// `arg` may be empty and may itself contain "|", so require at least 4 parts.
 	if (parts.length < 4 || parts[0] !== "c") return null;
 	const accountId = parts[1]!;
 	return ACCOUNT_ID.test(accountId) ? accountId : null;
+}
+
+/**
+ * Fallback for button presses: the extension writes the owning account into
+ * every button as `c|{accountId}|{action}|{arg}`. Returns that accountId, or
+ * null when the data does not have this shape.
+ */
+export function callbackAccountOf(update: Json): string | null {
+	return accountOfCallbackData(obj(update.callback_query)?.data);
+}
+
+/**
+ * The accountId written into the first of our buttons on a message
+ * (`reply_markup.inline_keyboard`, an array of rows of buttons), or null when
+ * the message has no such button. Ignores anything that is not that shape.
+ */
+export function keyboardAccountOf(message: Json | null): string | null {
+	const rows = obj(message?.reply_markup)?.inline_keyboard;
+	if (!Array.isArray(rows)) return null;
+	for (const row of rows) {
+		if (!Array.isArray(row)) continue;
+		for (const button of row) {
+			const accountId = accountOfCallbackData(obj(button)?.callback_data);
+			if (accountId) return accountId;
+		}
+	}
+	return null;
 }
 
 /** The message-like object of an update (message, edited_message, …), if any. */
@@ -142,10 +167,18 @@ export function targetFor(update: Json, claimedBy: string | null): string | null
 	if (claimedBy) return claimedBy;
 	// 3. Unclaimed button press: the account written into callback_data, else everyone.
 	if (update.callback_query !== undefined) return callbackAccountOf(update) ?? BROADCAST;
-	// 4. Unclaimed messages and things that point at a message (reactions,
-	//    inline results) cannot be attributed to a profile: drop them.
+	// 4. Unclaimed message. A reply to a bot message (an alert whose claim
+	//    expired or never arrived) uses the same fallback as a button press:
+	//    the accountId in the replied message's buttons, else everyone. Any
+	//    other message cannot be attributed to a profile: drop it.
+	const message = messageOf(update);
+	if (message) {
+		const replied = obj(message.reply_to_message);
+		if (replied && obj(replied.from)?.is_bot === true) return keyboardAccountOf(replied) ?? BROADCAST;
+		return null;
+	}
+	//    Reactions and inline results without a claim are dropped too.
 	if (
-		messageOf(update) ||
 		update.message_reaction !== undefined ||
 		update.message_reaction_count !== undefined ||
 		update.chosen_inline_result !== undefined

@@ -5,7 +5,8 @@
  * message it has no claim for, and routes the press to that profile only.
  * Telegram limits callback_data to 64 bytes.
  */
-export type CallbackAction = 'full' | 'check';
+/** full, check: alert buttons. rs, rc: "Send" and "Cancel" under a reply preview (arg = reply id). */
+export type CallbackAction = 'full' | 'check' | 'rs' | 'rc';
 
 export interface CallbackData {
   accountId: string;

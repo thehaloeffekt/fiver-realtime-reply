@@ -6,6 +6,7 @@ import { connectRelay, disconnectRelay, forgetSelf } from './relay';
 import { closeWatchTab, ensureWatchTab } from './watchTab';
 import { describeTelegramError, notify } from './notify';
 import { registerCommands } from './commands';
+import { dropAllReplies } from './replies';
 import { TelegramError } from '../lib/telegram';
 
 /** How long the options page waits for /start at step 3. */
@@ -109,6 +110,9 @@ export async function disconnectProfile(): Promise<DisconnectResult> {
       () => false,
     );
   }
+  // Pending replies from Telegram: stop a send in progress, mark open
+  // previews, drop them all (needs the token, so before storage is cleared).
+  await dropAllReplies().catch(() => undefined);
   // 2. Forget frame. It connects first if needed, so presence is fresh after it.
   if (s.botKey && s.secret) result.relayForgot = await forgetSelf();
   const { presence } = await getSession();
@@ -139,6 +143,7 @@ let removing: Promise<void> | null = null;
  */
 export function onRemovedRemotely(): Promise<void> {
   removing ??= (async () => {
+    await dropAllReplies().catch(() => undefined);
     await disconnectRelay();
     await closeWatchTab();
     await browser.alarms.clearAll();

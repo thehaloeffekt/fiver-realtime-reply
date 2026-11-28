@@ -374,6 +374,7 @@ function SettingsTab({ local, session }: { local: LocalState; session: SessionSt
             />
           </div>
         ))}
+        <SendReplies on={s.sendReplies} />
       </section>
 
       <MyTimeZone settings={s} now={now} />
@@ -396,6 +397,54 @@ function SettingsTab({ local, session }: { local: LocalState; session: SessionSt
       </section>
 
       <Connection local={local} session={session} now={now} />
+    </div>
+  );
+}
+
+/** Risky switch: turning it on needs an explicit confirmation; off saves at once. */
+function SendReplies({ on }: { on: boolean }) {
+  const [confirming, setConfirming] = useState(false);
+  return (
+    <div className="switch-row-block">
+      <div className="switch-row">
+        <div className="grow">
+          <div className="strong">Send replies from Telegram</div>
+          <div className="small warn-text" id="send-replies-warning">
+            The extension will type and send messages on Fiverr for you. Fiverr can treat automatic input as a rule violation. Use it at your own risk.
+          </div>
+        </div>
+        <Switch
+          label="Send replies from Telegram"
+          checked={on}
+          onChange={(v) => {
+            if (v) setConfirming(true);
+            else {
+              setConfirming(false);
+              void patchSettings({ sendReplies: false });
+            }
+          }}
+        />
+      </div>
+      {confirming && !on && (
+        <div className="confirm-box" role="alertdialog" aria-label="Turn on sending from Telegram">
+          <div className="strong">Turn on sending from Telegram?</div>
+          <div className="small">The extension will type and send messages on Fiverr for you, after you confirm each one in Telegram.</div>
+          <div className="row">
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={() => {
+                setConfirming(false);
+                void patchSettings({ sendReplies: true });
+              }}
+            >
+              Turn on
+            </button>
+            <button className="btn btn-sm" onClick={() => setConfirming(false)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

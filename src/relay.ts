@@ -44,6 +44,14 @@ export const MAX_QUEUED_NOTICES = 20;
 /** GET /bye calls per bot in any rolling minute (match or not). */
 export const BYE_RATE_LIMIT = 10;
 export const BYE_RATE_WINDOW_MS = 60_000;
+/**
+ * "peer" frames (profiles coordinating, e.g. /reply asking who has a buyer):
+ * the body's JSON is at most this many bytes, and a bot may send at most
+ * PEER_RATE_LIMIT of them in any rolling minute. They are never stored.
+ */
+export const MAX_PEER_BODY_BYTES = 1024;
+export const PEER_RATE_LIMIT = 60;
+export const PEER_RATE_WINDOW_MS = 60_000;
 const HOUSEKEEPING_INTERVAL_MS = 60_000;
 
 export const CLOSE = {
@@ -70,6 +78,7 @@ export interface AccountInfo {
 }
 
 const tagOf = (accountId: string) => `acct:${accountId}`;
+const encoder = new TextEncoder();
 
 /**
  * One instance per bot (keyed by botKey). Holds the trust-on-first-use secret
@@ -112,6 +121,7 @@ export class RelayHub extends DurableObject<Env> {
 			CREATE TABLE IF NOT EXISTS removed (account_id TEXT PRIMARY KEY, at INTEGER NOT NULL);
 			CREATE TABLE IF NOT EXISTS notices (id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT NOT NULL, created_at INTEGER NOT NULL);
 			CREATE TABLE IF NOT EXISTS bye_hits (at INTEGER NOT NULL);
+			CREATE TABLE IF NOT EXISTS peer_hits (at INTEGER NOT NULL);
 		`);
 		// The extension sends the text "ping" every 20 s. The runtime answers
 		// "pong" itself, so a hibernated object stays asleep. Only one pair can be
@@ -301,6 +311,8 @@ export class RelayHub extends DurableObject<Env> {
 				return this.handleAck(ws, state, msg);
 			case "forget":
 				return this.handleForget(ws, state, msg, now);
+			case "peer":
+				return this.handlePeer(ws, state, msg, now);
 			case "ping":
 				safeSend(ws, '{"type":"pong"}');
 				return;
@@ -482,6 +494,31 @@ export class RelayHub extends DurableObject<Env> {
 		return true;
 	}
 
+	/**
+	 * {"type":"peer","body":{…}}: passed at once to every other online profile
+	 * as {"type":"peer","from","body"}. Never stored, queued or replayed: a
+	 * profile that is offline simply does not get it.
+	 */
+	private handlePeer(ws: WebSocket, state: SocketState, msg: Record<string, unknown>, now: number) {
+		const body = msg.body;
+		if (body === null || typeof body !== "object" || Array.isArray(body)) return sendError(ws, "bad_peer");
+		const json = JSON.stringify(body);
+		if (encoder.encode(json).byteLength > MAX_PEER_BODY_BYTES) return sendError(ws, "bad_peer", "body too large");
+		if (!this.takePeerSlot(now)) return sendError(ws, "peer_rate");
+		const frame = `{"type":"peer","from":${JSON.stringify(state.accountId)},"body":${json}}`;
+		for (const other of this.authedSockets()) {
+			if (stateOf(other)!.accountId !== state.accountId) safeSend(other, frame);
+		}
+	}
+
+	private takePeerSlot(now: number): boolean {
+		this.sql.exec("DELETE FROM peer_hits WHERE at <= ?", now - PEER_RATE_WINDOW_MS);
+		const used = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM peer_hits").one().n;
+		if (used >= PEER_RATE_LIMIT) return false;
+		this.sql.exec("INSERT INTO peer_hits (at) VALUES (?)", now);
+		return true;
+	}
+
 	private async handleClaim(ws: WebSocket, state: SocketState, msg: Record<string, unknown>, now: number) {
 		const items = Array.isArray(msg.items) ? msg.items : [msg];
 		if (items.length > MAX_CLAIMS_PER_MESSAGE) return sendError(ws, "too_many_claims");
@@ -580,6 +617,7 @@ export class RelayHub extends DurableObject<Env> {
 		this.sql.exec("DELETE FROM removed WHERE at <= ?", now - REMOVED_TTL_MS);
 		this.sql.exec("DELETE FROM notices WHERE created_at <= ?", now - NOTICE_TTL_MS);
 		this.sql.exec("DELETE FROM bye_hits WHERE at <= ?", now - BYE_RATE_WINDOW_MS);
+		this.sql.exec("DELETE FROM peer_hits WHERE at <= ?", now - PEER_RATE_WINDOW_MS);
 		const count = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM routes").one().n;
 		if (count > MAX_ROUTES) {
 			this.sql.exec(

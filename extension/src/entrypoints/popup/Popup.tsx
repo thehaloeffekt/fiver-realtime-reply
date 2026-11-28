@@ -155,6 +155,11 @@ function Main({ local, session }: { local: LocalState; session: SessionState }) 
               <span className="detail small ellipsis">{st.text}</span>
             </div>
           ))}
+          <div className="status-row" data-testid="send-replies-state">
+            <Dot tone={local.settings.sendReplies ? 'warn' : 'idle'} />
+            <span className="name">Sending from Telegram</span>
+            <span className="detail small ellipsis">{local.settings.sendReplies ? 'on' : 'off'}</span>
+          </div>
         </section>
 
         {checkResult && (

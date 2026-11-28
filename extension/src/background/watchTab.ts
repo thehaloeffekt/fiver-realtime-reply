@@ -7,6 +7,7 @@
  */
 import { browser, type Browser } from 'wxt/browser';
 import { FIVERR_ORIGIN, INBOX_URL, inboxUrlFor } from '../lib/constants';
+import type { ComposeRequest } from '../content/composer';
 import type { BackgroundToContent, ConversationRead, InboxSnapshot, ReadResult } from '../lib/messages';
 import { getLocal, getSession, isConfigured, removeSession, setSession } from '../lib/storage';
 
@@ -156,7 +157,7 @@ export async function reloadInbox(tabId: number): Promise<void> {
 }
 
 /** Sends a message to the watch tab's content script, retrying until it is ready. */
-async function askTab<T>(tabId: number, msg: BackgroundToContent): Promise<T> {
+export async function askTab<T>(tabId: number, msg: BackgroundToContent | ComposeRequest): Promise<T> {
   const deadline = Date.now() + CONTENT_TIMEOUT_MS;
   let lastErr: unknown;
   while (Date.now() < deadline) {
@@ -172,7 +173,7 @@ async function askTab<T>(tabId: number, msg: BackgroundToContent): Promise<T> {
 }
 
 /** One try with a short timeout, for a page that may be frozen. Null when it does not answer. */
-export async function askTabOnce<T>(tabId: number, msg: BackgroundToContent, timeoutMs: number): Promise<T | null> {
+export async function askTabOnce<T>(tabId: number, msg: BackgroundToContent | ComposeRequest, timeoutMs: number): Promise<T | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<null>((r) => (timer = setTimeout(() => r(null), timeoutMs)));
   try {
@@ -201,19 +202,26 @@ export async function reloadAndRead(): Promise<InboxSnapshot> {
 }
 
 /**
- * "Full message": open the conversation in the watch tab, read the buyer's
- * last messages, then go back to /inbox. Opening it marks it read on Fiverr.
+ * Opens the conversation with `username` in the watch tab, runs `fn` there,
+ * then goes back to /inbox, whatever happened. Opening it marks it read on
+ * Fiverr. Used by "Full message" (reads) and by "Send replies from
+ * Telegram" (the one job that writes, see replyDriver.ts).
  */
-export async function readConversation(username: string, limit = 10): Promise<ReadResult<ConversationRead>> {
-  const { detectedUsername } = await getLocal();
+export function withConversation<T>(username: string, fn: (tabId: number) => Promise<T>): Promise<T> {
   return withWatchTab(async (tabId) => {
     await navigate(tabId, inboxUrlFor(username), false);
     try {
-      return await askTab<ReadResult<ConversationRead>>(tabId, { type: 'readConversation', limit, myUsername: detectedUsername });
+      return await fn(tabId);
     } finally {
       await navigate(tabId, INBOX_URL, false).catch(() => undefined);
     }
   });
+}
+
+/** "Full message": the buyer's last messages, read in the watch tab. */
+export async function readConversation(username: string, limit = 10): Promise<ReadResult<ConversationRead>> {
+  const { detectedUsername } = await getLocal();
+  return withConversation(username, (tabId) => askTab<ReadResult<ConversationRead>>(tabId, { type: 'readConversation', limit, myUsername: detectedUsername }));
 }
 
 export async function closeWatchTab(): Promise<void> {

@@ -107,7 +107,7 @@ describe('parsing and labels', () => {
   });
 
   it('the "/" menu list is valid for Telegram', () => {
-    expect(BOT_COMMANDS.map((c) => c.command)).toEqual(['check', 'full', 'status', 'pause', 'resume', 'timezone', 'accounts', 'remove', 'help']);
+    expect(BOT_COMMANDS.map((c) => c.command)).toEqual(['check', 'full', 'reply', 'status', 'pause', 'resume', 'timezone', 'accounts', 'remove', 'help']);
     for (const c of BOT_COMMANDS) {
       expect(c.command).toMatch(/^[a-z0-9_]{1,32}$/);
       expect(c.description.length).toBeGreaterThan(2);
@@ -240,11 +240,11 @@ describe('/status', () => {
     asSecond();
     await say('/status');
     // The Unread chip counts conversations, so the text says conversations, not messages.
-    expect(sent[0]!.html).toBe('<b>Second</b>: online, alerts on, 3 unread conversations, last alert never');
+    expect(sent[0]!.html).toBe('<b>Second</b>: online, alerts on, 3 unread conversations, last alert never, sending from Telegram off');
     watch.unread = 1;
     sent.length = 0;
     await say('/status');
-    expect(sent[0]!.html).toBe('<b>Second</b>: online, alerts on, 1 unread conversation, last alert never');
+    expect(sent[0]!.html).toBe('<b>Second</b>: online, alerts on, 1 unread conversation, last alert never, sending from Telegram off');
   });
 
   it('falls back to the count from the last reload; the leader lists offline accounts', async () => {
@@ -252,7 +252,7 @@ describe('/status', () => {
     asMain(presence(['acc-a', 'Main', true], ['acc-c', 'Third', false]), { lastUnread: 2 });
     await say('/status');
     const lines = sent[0]!.html.split('\n');
-    expect(lines[0]).toBe('<b>Main</b>: online, alerts on, 2 unread conversations (at the last reload), last alert never');
+    expect(lines[0]).toBe('<b>Main</b>: online, alerts on, 2 unread conversations (at the last reload), last alert never, sending from Telegram off');
     expect(lines[1]).toMatch(/^<b>Third<\/b>: offline since /);
   });
 });
@@ -310,7 +310,7 @@ describe('/timezone', () => {
     await say('/full some_buyer');
     expect(sent[0]!.html.split('\n')[1]).toBe('Times: Africa/Lagos.');
     await say('/status');
-    expect(sent[1]!.html.split('\n')[0]).toMatch(/last alert \d{1,2}:\d\d [AP]M \(Africa\/Lagos\)$/);
+    expect(sent[1]!.html.split('\n')[0]).toMatch(/last alert \d{1,2}:\d\d [AP]M \(Africa\/Lagos\), sending from Telegram off$/);
   });
 
   it('is in /help', () => {

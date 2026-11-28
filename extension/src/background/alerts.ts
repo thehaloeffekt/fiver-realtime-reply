@@ -10,6 +10,7 @@ import { getLocal, getSession, isConfigured, labelOf, setLocal, setSession, upda
 import { describeBody, type Toast } from '../lib/toast';
 import { zoneFor } from './buyerZones';
 import { notify } from './notify';
+import { rememberReplyTarget } from './replyTargets';
 import { conversationInView } from './view';
 
 /** Keys are kept for REPLAY_WINDOW_MS so replayed toasts can be checked against them. */
@@ -116,6 +117,30 @@ export async function handleThreadMessage(m: ThreadMessage): Promise<void> {
   return handleIncoming({ source: 'thread', displayName, username, body: shownText, keyBody, shown: { kind: text ? 'text' : 'attachment', text: shownText }, messageId: id });
 }
 
+/**
+ * Messages this profile sent itself ("Send replies from Telegram"): key →
+ * until when. The detectors already skip my own messages ("Me", my avatar,
+ * "Me: " in the list); this is a second guard in case Fiverr shows one
+ * without those marks. In memory: a worker restart forgets it, and then the
+ * detectors' own rules still apply.
+ */
+const ownMessages = new Map<string, number>();
+export const OWN_MESSAGE_WINDOW_MS = 10 * 60_000;
+
+/** Called right before the extension clicks Send for `username`. */
+export async function expectOwnMessage(username: string, text: string): Promise<void> {
+  const { accountId } = await getLocal();
+  if (!accountId) return;
+  const now = Date.now();
+  for (const [k, until] of ownMessages) if (until < now) ownMessages.delete(k);
+  ownMessages.set(dedupeKey(accountId, senderId(username, ''), text), now + OWN_MESSAGE_WINDOW_MS);
+}
+
+function isOwnMessage(key: string, now: number): boolean {
+  const until = ownMessages.get(key);
+  return until !== undefined && until >= now;
+}
+
 async function handleIncoming(m: Incoming): Promise<void> {
   await loadDedupe();
   const s = await getLocal();
@@ -133,6 +158,7 @@ async function handleIncoming(m: Incoming): Promise<void> {
   if (!m.username) m.username = s.knownUsers[senderKey(m.displayName)] ?? '';
   const sender = senderId(m.username, m.displayName);
   const key = dedupeKey(s.accountId, sender, m.keyBody ?? m.body);
+  if (isOwnMessage(key, now)) return;
   // The same message id from two tabs (both with the conversation open).
   const idKey = m.messageId ? `${s.accountId}\u0000id\u0000${m.messageId}` : null;
   if (idKey && !deduper.take(idKey, now, REPLAY_WINDOW_MS)) return;
@@ -152,7 +178,9 @@ async function handleIncoming(m: Incoming): Promise<void> {
   const buyerTime = zone ? formatBuyerAt(now, zone, now, myZone(s.settings).zone) : undefined;
   const { html, keyboard } = formatAlert(labelOf(s), m, body.text, s.accountId, m.more ?? 0, buyerTime);
   try {
-    await notify(html, { keyboard, claim: true, retries: 3 });
+    const sent = await notify(html, { keyboard, claim: true, retries: 3 });
+    // A reply to this alert in Telegram goes to this buyer.
+    if (m.username && sent) await rememberReplyTarget(sent.message_id, m.username).catch(() => undefined);
     await setLocal({ lastAlertAt: now });
     await remember(recent);
   } catch (err) {

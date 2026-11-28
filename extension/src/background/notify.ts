@@ -4,7 +4,7 @@
  */
 import { getLocal, updateSession } from '../lib/storage';
 import { splitTelegramHtml } from '../lib/split';
-import { TelegramError, answerCallbackQuery, sendMessage, type InlineKeyboard, type SentMessage } from '../lib/telegram';
+import { TelegramError, answerCallbackQuery, editMessageText, sendMessage, type InlineKeyboard, type SentMessage } from '../lib/telegram';
 import { claim } from './relay';
 
 export interface NotifyOptions {
@@ -76,5 +76,22 @@ export async function answerCallback(id: string, text?: string): Promise<void> {
     await answerCallbackQuery(token, id, text);
   } catch {
     // Another profile may have answered first, or the query is older than 15 min.
+  }
+}
+
+/**
+ * Edits a message in the linked chat. "message is not modified" counts as
+ * done. Returns false when Telegram refused or could not be reached.
+ */
+export async function editNotice(messageId: number, html: string, keyboard?: InlineKeyboard): Promise<boolean> {
+  const s = await getLocal();
+  if (!s.token || !s.chatId) return false;
+  try {
+    await editMessageText(s.token, s.chatId, messageId, html, keyboard);
+    return true;
+  } catch (err) {
+    if (err instanceof TelegramError && /not modified/i.test(err.description)) return true;
+    void recordTelegram(false, err);
+    return false;
   }
 }

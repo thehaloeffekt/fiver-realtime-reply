@@ -7,13 +7,17 @@ import type { DiagEntry, DiagKind } from '../lib/diagnostics';
 import { startPicker } from '../content/picker';
 import { watchBuyerHeader } from '../content/buyerHeader';
 import { watchThread } from '../content/threadWatcher';
+import { handleCompose, type ComposeRequest } from '../content/composer';
 import { readConversation, readInbox, readUnreadChip, waitForLoggedInUsername } from '../content/reader';
 import type { RowState } from '../lib/listState';
 import type { BackgroundToContent, ContentToBackground, InboxSnapshot, ListStatus } from '../lib/messages';
 
 /**
- * Runs on every Fiverr page. It only reads the page: it never types, clicks
- * or submits anything. (The debug picker swallows the user's own click.)
+ * Runs on every Fiverr page. It only reads the page, with one exception:
+ * "compose:*" messages go to src/content/composer.ts, the one module that
+ * types in the message box and clicks Send ("Send replies from Telegram",
+ * after the user confirmed the text in Telegram). Nothing else here types,
+ * clicks or submits. (The debug picker swallows the user's own click.)
  */
 export default defineContentScript({
   matches: ['https://www.fiverr.com/*'],
@@ -99,6 +103,13 @@ export default defineContentScript({
     ctx.onInvalidated(() => {
       browser.storage.onChanged.removeListener(onSettings);
       stopDiag?.();
+    });
+
+    // The only write path ("Send replies from Telegram"): see src/content/composer.ts.
+    browser.runtime.onMessage.addListener((msg: ComposeRequest, _sender, sendResponse) => {
+      if (typeof msg?.type !== 'string' || !msg.type.startsWith('compose:')) return;
+      handleCompose(msg).then(sendResponse, (e) => sendResponse({ ok: false, stop: 'no-box', reason: String(e) }));
+      return true;
     });
 
     browser.runtime.onMessage.addListener((msg: BackgroundToContent, _sender, sendResponse) => {

@@ -5,7 +5,9 @@ import {
 	BYE_RATE_LIMIT,
 	CLOSE,
 	HOOK_RATE_LIMIT,
+	MAX_PEER_BODY_BYTES,
 	MAX_QUEUED_UPDATES,
+	PEER_RATE_LIMIT,
 	REMOVED_TTL_MS,
 	ROUTE_TTL_MS,
 	UPDATE_HARD_LIMIT_MS,
@@ -774,5 +776,268 @@ describe("removal", () => {
 		});
 		expect(await runDurableObjectAlarm(stub)).toBe(true);
 		expect((await leftovers(bot.botKey, "bob")).removed).toBe(0);
+	});
+});
+
+describe("replies from Telegram", () => {
+	const CHAT = 4242;
+	const TEXT = "Hello from a test";
+	const BOT_FROM = { id: 1000, is_bot: true, first_name: "Alerts" };
+	const USER_FROM = { id: 2000, is_bot: false, first_name: "Tester" };
+
+	/** An alert as Telegram repeats it inside reply_to_message. */
+	const alert = (messageId: number, keyboard?: unknown) => ({
+		message_id: messageId,
+		chat: { id: CHAT },
+		from: BOT_FROM,
+		text: "New message from test_buyer_one",
+		...(keyboard === undefined ? {} : { reply_markup: { inline_keyboard: keyboard } }),
+	});
+	const replyTo = (updateId: number, replied: unknown, text = TEXT) => ({
+		update_id: updateId,
+		message: { message_id: updateId + 10_000, chat: { id: CHAT }, from: USER_FROM, text, reply_to_message: replied },
+	});
+
+	/** Every row of every table of the bot's Durable Object, as JSON text. */
+	const everyRow = (botKey: string) =>
+		runInDurableObject(stubFor(botKey), (_i, state) => {
+			const sql = state.storage.sql;
+			const tables = sql
+				.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%'")
+				.toArray()
+				.map((r) => r.name);
+			return { tables, dump: JSON.stringify(tables.map((t) => sql.exec(`SELECT * FROM "${t}"`).toArray())) };
+		});
+
+	it("a plain-text reply to a claimed alert goes only to the claiming account", async () => {
+		const bot = await newBot();
+		const a = await connect(bot, "acc-a");
+		const b = await connect(bot, "acc-b");
+		a.send({ type: "claim", chatId: CHAT, messageId: 1 });
+		await pause();
+		// The buttons name acc-b, but the claim wins.
+		const update = replyTo(100, alert(1, [[{ text: "Full", callback_data: "c|acc-b|full|x" }]]));
+		expect((await hook(bot.botKey, bot.secret, update)).status).toBe(200);
+		expect(await a.next("update")).toEqual({ type: "update", id: 100, routed: true, update });
+		expect(await silent(b, "update")).toBe(true);
+		a.ws.close();
+		b.ws.close();
+	});
+
+	it("an unclaimed reply to a bot message goes to the account in its buttons", async () => {
+		const bot = await newBot();
+		const a = await connect(bot, "acc-a");
+		const b = await connect(bot, "acc-b");
+		const keyboard = [
+			[{ text: "Open", url: "https://www.fiverr.com/inbox/test_buyer_one" }, { text: "Other", callback_data: "open|1" }],
+			[{ text: "Full", callback_data: "c|acc-b|full|x" }, { text: "Later", callback_data: "c|acc-a|full|y" }],
+		];
+		await hook(bot.botKey, bot.secret, replyTo(101, alert(2, keyboard)));
+		expect(await b.next("update")).toMatchObject({ id: 101, routed: true });
+		expect(await silent(a, "update")).toBe(true);
+		a.ws.close();
+		b.ws.close();
+	});
+
+	it("an unclaimed reply to a bot message without our buttons goes to everyone", async () => {
+		const bot = await newBot();
+		const a = await connect(bot, "acc-a");
+		const b = await connect(bot, "acc-b");
+		const shapes = [
+			alert(3), // no reply_markup
+			alert(4, [[{ text: "Other", callback_data: "open|1" }, { text: "Link", url: "https://example.com" }]]),
+			alert(5, "not an array"),
+			alert(6, [null, "x", [null, 7, { callback_data: 5 }, { callback_data: "c|bad id!|x|y" }]]),
+		];
+		for (const [i, replied] of shapes.entries()) {
+			const id = 110 + i;
+			await hook(bot.botKey, bot.secret, replyTo(id, replied));
+			expect(await a.next("update")).toMatchObject({ id, routed: false });
+			expect(await b.next("update")).toMatchObject({ id, routed: false });
+		}
+		a.ws.close();
+		b.ws.close();
+	});
+
+	it("drops a reply to a non-bot message and a plain message that replies to nothing", async () => {
+		const bot = await newBot();
+		const a = await connect(bot, "acc-a");
+		const b = await connect(bot, "acc-b");
+		const userMessage = { message_id: 7, chat: { id: CHAT }, from: USER_FROM, text: "earlier", reply_markup: { inline_keyboard: [[{ text: "x", callback_data: "c|acc-b|full|x" }]] } };
+		const updates = [
+			replyTo(120, userMessage),
+			replyTo(121, { message_id: 8, chat: { id: CHAT }, text: "no sender" }),
+			replyTo(122, { message_id: 9, chat: { id: CHAT }, from: { id: 1, is_bot: "true" }, text: "string is_bot" }),
+			{ update_id: 123, message: { message_id: 9, chat: { id: CHAT }, from: USER_FROM, text: TEXT } },
+		];
+		for (const u of updates) expect((await hook(bot.botKey, bot.secret, u)).status).toBe(200);
+		expect(await silent(a, "update")).toBe(true);
+		expect(await silent(b, "update")).toBe(true);
+		expect(await pendingCount(bot.botKey)).toBe(0);
+		a.ws.close();
+		b.ws.close();
+	});
+
+	it("a command sent as a reply to an alert is still broadcast", async () => {
+		const bot = await newBot();
+		const a = await connect(bot, "acc-a");
+		const b = await connect(bot, "acc-b");
+		a.send({ type: "claim", chatId: CHAT, messageId: 10 });
+		await pause();
+		await hook(bot.botKey, bot.secret, replyTo(130, alert(10, [[{ text: "Full", callback_data: "c|acc-a|full|x" }]]), "/reply test_buyer_one"));
+		await hook(bot.botKey, bot.secret, replyTo(131, alert(11, [[{ text: "Full", callback_data: "c|acc-a|full|x" }]]), "/status"));
+		for (const id of [130, 131]) {
+			expect(await a.next("update")).toMatchObject({ id, routed: false });
+			expect(await b.next("update")).toMatchObject({ id, routed: false });
+		}
+		a.ws.close();
+		b.ws.close();
+	});
+
+	it("a reply for an offline account is queued, one profile is told, and it is replayed on connect", async () => {
+		const bot = await newBot();
+		const a = await connect(bot, "acc-a", "Profile A");
+		const c = await connect(bot, "acc-c", "Profile C");
+		const b = await connect(bot, "acc-b", "Profile B");
+		b.send({ type: "claim", chatId: CHAT, messageId: 20 });
+		await pause();
+		b.ws.close();
+		await b.closed;
+
+		// One reply routed by claim, one by the buttons of an unclaimed alert.
+		const byClaim = replyTo(140, alert(20));
+		const byButtons = replyTo(141, alert(21, [[{ text: "Full", callback_data: "c|acc-b|full|x" }]]));
+		await hook(bot.botKey, bot.secret, byClaim);
+		const notice = await Promise.any([a.next("offline"), c.next("offline")]);
+		expect(notice).toEqual({ type: "offline", accountId: "acc-b", label: "Profile B" });
+		expect((await silent(a, "offline")) && (await silent(c, "offline"))).toBe(true);
+		await hook(bot.botKey, bot.secret, byButtons);
+		expect(await silent(a, "update")).toBe(true);
+		expect(await silent(c, "update")).toBe(true);
+		expect(await pendingCount(bot.botKey)).toBe(2);
+
+		const b2 = await connect(bot, "acc-b", "Profile B");
+		expect(await b2.next("update")).toEqual({ type: "update", id: 140, routed: true, update: byClaim });
+		expect(await b2.next("update")).toEqual({ type: "update", id: 141, routed: true, update: byButtons });
+		b2.send({ type: "ack", ids: [140, 141] });
+		await pause();
+		expect(await pendingCount(bot.botKey)).toBe(0);
+		a.ws.close();
+		c.ws.close();
+		b2.ws.close();
+	});
+
+	it(`still drops webhook number ${HOOK_RATE_LIMIT + 1} in a minute, replies included`, async () => {
+		const bot = await newBot();
+		const a = await connect(bot, "acc-a");
+		a.send({ type: "claim", chatId: CHAT, messageId: 30 });
+		await pause();
+		for (let i = 1; i <= HOOK_RATE_LIMIT; i++) {
+			expect((await hook(bot.botKey, bot.secret, replyTo(1000 + i, alert(30)))).status).toBe(200);
+		}
+		for (let i = 1; i <= HOOK_RATE_LIMIT; i++) expect((await a.next("update")).id).toBe(1000 + i);
+		const over = replyTo(1000 + HOOK_RATE_LIMIT + 1, alert(30));
+		expect((await hook(bot.botKey, bot.secret, over)).status).toBe(200);
+		expect(await silent(a, "update")).toBe(true);
+		a.ws.close();
+	});
+
+	it("does not keep the reply text once the target has acked it", async () => {
+		const bot = await newBot();
+		const a = await connect(bot, "acc-a");
+		const b = await connect(bot, "acc-b");
+		a.send({ type: "claim", chatId: CHAT, messageId: 40 });
+		await pause();
+		await hook(bot.botKey, bot.secret, replyTo(150, alert(40)));
+		expect((await a.next("update")).id).toBe(150);
+
+		// Before the ack the update waits in `pending` (so the search below works).
+		const before = await everyRow(bot.botKey);
+		expect(before.tables).toEqual(expect.arrayContaining(["pending", "seen", "routes"]));
+		expect(before.dump).toContain(TEXT);
+
+		// Another profile's ack does not remove a routed update; the target's does.
+		b.send({ type: "ack", ids: [150] });
+		await pause();
+		expect(await pendingCount(bot.botKey)).toBe(1);
+		a.send({ type: "ack", ids: [150] });
+		await pause();
+		const after = await everyRow(bot.botKey);
+		expect(after.dump).not.toContain(TEXT);
+		expect(after.dump).not.toContain("test_buyer_one");
+		// Only the update_id is left, for de-duplication.
+		const seen = await runInDurableObject(stubFor(bot.botKey), (_i, state) =>
+			state.storage.sql.exec("SELECT * FROM seen").toArray(),
+		);
+		expect(seen).toEqual([{ update_id: 150, at: expect.any(Number) }]);
+		a.ws.close();
+		b.ws.close();
+	});
+});
+
+describe("peer frames", () => {
+	const peerRows = (botKey: string) =>
+		runInDurableObject(stubFor(botKey), (_i, state) => ({
+			pending: state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM pending").one().n,
+			notices: state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM notices").one().n,
+		}));
+
+	it("forwards a peer frame to every other online profile, not to the sender, and stores nothing", async () => {
+		const bot = await newBot();
+		const a = await connect(bot, "acc-a");
+		const b = await connect(bot, "acc-b");
+		const c = await connect(bot, "acc-c");
+		const body = { kind: "has_buyer", ask: 12345, yes: true };
+		a.send({ type: "peer", body });
+		for (const other of [b, c]) expect(await other.next("peer")).toEqual({ type: "peer", from: "acc-a", body });
+		expect(await silent(a, "peer")).toBe(true);
+		expect(await peerRows(bot.botKey)).toEqual({ pending: 0, notices: 0 });
+
+		// A profile that connects later gets nothing replayed.
+		const d = await connect(bot, "acc-d");
+		expect(await silent(d, "peer")).toBe(true);
+		for (const x of [a, b, c, d]) x.ws.close();
+	});
+
+	it("refuses a body that is not an object or is too large with bad_peer", async () => {
+		const bot = await newBot();
+		const a = await connect(bot, "acc-a");
+		const b = await connect(bot, "acc-b");
+		for (const body of [undefined, null, "text", 5, [1, 2]]) {
+			a.send({ type: "peer", body });
+			expect(await a.next("error")).toMatchObject({ error: "bad_peer" });
+		}
+		// The JSON of {"x":"…"} is 8 bytes plus the string.
+		a.send({ type: "peer", body: { x: "y".repeat(MAX_PEER_BODY_BYTES - 8 + 1) } });
+		expect(await a.next("error")).toMatchObject({ error: "bad_peer" });
+		// Multi-byte characters count as bytes, not characters.
+		a.send({ type: "peer", body: { x: "é".repeat(MAX_PEER_BODY_BYTES / 2) } });
+		expect(await a.next("error")).toMatchObject({ error: "bad_peer" });
+		expect(await silent(b, "peer")).toBe(true);
+
+		a.send({ type: "peer", body: { x: "y".repeat(MAX_PEER_BODY_BYTES - 8) } });
+		expect((await b.next("peer")).body.x).toHaveLength(MAX_PEER_BODY_BYTES - 8);
+		a.ws.close();
+		b.ws.close();
+	});
+
+	it(`allows ${PEER_RATE_LIMIT} peer frames per bot per minute, then peer_rate`, async () => {
+		const bot = await newBot();
+		const a = await connect(bot, "acc-a");
+		const b = await connect(bot, "acc-b");
+		// The limit is per bot: frames from both profiles count.
+		for (let i = 0; i < PEER_RATE_LIMIT; i++) (i % 2 ? b : a).send({ type: "peer", body: { n: i } });
+		for (let i = 0; i < PEER_RATE_LIMIT; i++) expect((await (i % 2 ? a : b).next("peer")).body.n).toBe(i);
+		a.send({ type: "peer", body: { n: "over" } });
+		expect(await a.next("error")).toMatchObject({ error: "peer_rate" });
+		expect(await silent(b, "peer")).toBe(true);
+
+		await runInDurableObject(stubFor(bot.botKey), (_i, state) => {
+			state.storage.sql.exec("UPDATE peer_hits SET at = at - 60000");
+		});
+		a.send({ type: "peer", body: { n: "again" } });
+		expect((await b.next("peer")).body.n).toBe("again");
+		a.ws.close();
+		b.ws.close();
 	});
 });

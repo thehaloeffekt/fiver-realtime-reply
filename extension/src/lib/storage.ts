@@ -57,6 +57,39 @@ export interface LocalState {
   buyerZones: Record<string, BuyerZone>;
   /** Background diagnostics (debug mode): the last 300 entries from Fiverr pages. */
   diagnostics: DiagEntry[];
+  /**
+   * Replies from Telegram, by id (see src/background/replies.ts). The text is
+   * kept only while the reply is in "preview" or "sending"; finished ones
+   * keep only their state, and are deleted 10 minutes after they finish.
+   */
+  replies?: Record<string, PendingReply>;
+  /**
+   * Telegram message id (alerts and "Full message" parts) → buyer username,
+   * so a reply in Telegram knows which buyer it is for. No message text.
+   * Newest 500, for 14 days.
+   */
+  replyTargets?: Record<string, { buyer: string; at: number }>;
+}
+
+export type ReplyState = 'preview' | 'sending' | 'sent' | 'failed' | 'unknown' | 'cancelled' | 'expired';
+
+export interface PendingReply {
+  id: string;
+  state: ReplyState;
+  buyer: string;
+  /** The account label shown in the preview. */
+  label: string;
+  /** Only while "preview" or "sending". */
+  text?: string;
+  /** "{chat id}:{message id}" of the Telegram message that asked for it: the same update twice makes one preview. */
+  sourceKey: string;
+  previewId?: number;
+  createdAt: number;
+  expiresAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+  /** The final line shown in the preview (HTML), for later button presses. */
+  result?: string;
 }
 
 export interface Settings {
@@ -73,6 +106,11 @@ export interface Settings {
    * the profile's configured zone, not the computer's. See myZone.ts.
    */
   myTimeZone: string;
+  /**
+   * "Send replies from Telegram". Off by default. The only setting that lets
+   * the extension type and click on Fiverr (see src/content/composer.ts).
+   */
+  sendReplies: boolean;
 }
 
 export interface RecentAlert {
@@ -99,6 +137,7 @@ export const DEFAULT_SETTINGS: Settings = {
   reloadMinMinutes: 25,
   reloadMaxMinutes: 35,
   myTimeZone: '',
+  sendReplies: false,
 };
 
 const LOCAL_DEFAULTS: LocalState = {
@@ -111,6 +150,8 @@ const LOCAL_DEFAULTS: LocalState = {
   knownUsers: {},
   buyerZones: {},
   diagnostics: [],
+  replies: {},
+  replyTargets: {},
 };
 
 /** chrome.storage.session: cleared when the browser closes. Tab ids are only valid until then. */
